@@ -20,6 +20,9 @@ use std::{
 
 const VERSION: &str = "ssh-tunnel-invite-1";
 const HANDLER: &str = "/usr/local/libexec/ssh-tunnel-invite";
+pub(crate) const INSTALLER: &str = include_str!("../install-invitations.sh");
+pub(crate) const UPDATE_REQUIRED: &str =
+    "На сервере установлена старая версия поддержки приглашений. Нажмите «Обновить сервер».";
 
 #[derive(Serialize, Deserialize)]
 struct Ticket {
@@ -175,12 +178,29 @@ fn request<T: DeserializeOwned>(
     operation: &str,
     data: Value,
 ) -> Result<T, String> {
+    exchange(
+        profile,
+        password_auth,
+        secret,
+        &format!("{HANDLER} {operation}"),
+        &data.to_string(),
+        35,
+    )
+}
+
+fn exchange<T: DeserializeOwned>(
+    profile: &Profile,
+    password_auth: bool,
+    secret: String,
+    remote: &str,
+    input: &str,
+    timeout: u64,
+) -> Result<T, String> {
     profile.validate()?;
     let (mut command, mut diagnostics) = ssh_command_policy(profile, password_auth, secret, true)?;
     let _pin = pin_host(&mut command, profile)?;
-    let remote = format!("{HANDLER} {operation}");
     command
-        .args(["--", &profile.server, &remote])
+        .args(["--", &profile.server, remote])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     let mut child = command.spawn().map_err(|e| e.to_string())?;
@@ -190,8 +210,12 @@ fn request<T: DeserializeOwned>(
         stdout.read_to_end(&mut data)?;
         Ok::<_, std::io::Error>(data)
     });
-    let write = writeln!(child.stdin.take().expect("piped SSH input"), "{data}");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
+    let write = child
+        .stdin
+        .take()
+        .expect("piped SSH input")
+        .write_all(input.as_bytes());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break status;
@@ -213,10 +237,11 @@ fn request<T: DeserializeOwned>(
         ));
     }
     write.map_err(|e| e.to_string())?;
-    let data = reader.join().map_err(|_| "Не удалось прочитать ответ SSH.")?
+    let data = reader
+        .join()
+        .map_err(|_| "Не удалось прочитать ответ SSH.")?
         .map_err(|error| error.to_string())?;
-    serde_json::from_slice(&data)
-        .map_err(|_| "Сервер вернул неверный ответ приглашения.".into())
+    serde_json::from_slice(&data).map_err(|_| "Сервер вернул неверный ответ приглашения.".into())
 }
 
 pub fn issue(profile: SavedProfile, secret: String, name: String) -> Result<Invitation, String> {
@@ -333,6 +358,49 @@ pub fn list(profile: &SavedProfile, secret: String) -> Result<Vec<AccessEntry>, 
         secret,
         "list",
         json!({}),
+    )
+    .map_err(|error| {
+        if error.lines().any(|line| {
+            line.trim() == "SSH Tunnel invitations: 'list'"
+                || (line.contains(HANDLER) && line.contains("No such file or directory"))
+        }) {
+            UPDATE_REQUIRED.to_owned()
+        } else {
+            error
+        }
+    })
+}
+
+pub fn update_and_list(profile: &SavedProfile, secret: String) -> Result<Vec<AccessEntry>, String> {
+    if profile.connection.user != "root" {
+        return Err("Обновление приглашений доступно владельцу сервера.".into());
+    }
+    let installer = INSTALLER.replace("\r\n", "\n");
+    let size = installer.len();
+    let command = format!(
+        r#"set -eu
+[ "$(id -u)" = 0 ]
+umask 077
+script=$(mktemp /tmp/ssh-tunnel-invitations.XXXXXX)
+trap 'rm -f "$script"' EXIT
+head -c {size} > "$script"
+if [ "$(wc -c < "$script")" -ne {size} ]; then
+    echo 'Invitation installer transfer was interrupted.' >&2
+    exit 1
+fi
+(
+    flock -w 120 9
+    sh "$script" </dev/null >&2
+) 9>/run/ssh-tunnel-vpn-install.lock
+printf '%s\n' '{{}}' | {HANDLER} list"#
+    );
+    exchange(
+        &profile.connection,
+        profile.authentication == Authentication::Password,
+        secret,
+        &command,
+        &installer,
+        600,
     )
 }
 

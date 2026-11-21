@@ -244,7 +244,8 @@ impl Desktop {
             }
             ui.add_enabled_ui(manageable, |ui| {
                 use crate::invite_ui::Operation;
-                if ui.button("Импортировать приглашение").clicked() {
+                if pill(ui, "Импортировать приглашение", 208.0, false).clicked()
+                {
                     self.invitations.open(Operation::Import);
                 }
             });
@@ -279,6 +280,7 @@ impl Desktop {
                 vec2((width - share_width).max(90.0), 58.0),
                 Layout::top_down(Align::Min),
                 |ui| {
+                    ui.set_min_width((width - share_width).max(90.0));
                     ui.label(RichText::new("Подключение").small().color(MUTED));
                     let name = self.client.draft.name.trim();
                     ui.add(
@@ -393,11 +395,13 @@ impl Desktop {
             ui.add_space(16.0);
             surface(CARD, 22, 20).show(ui, |ui| {
                 let width = ui.available_width();
+                ui.set_min_width(width);
                 ui.horizontal(|ui| {
                     ui.allocate_ui_with_layout(
                         vec2((width - 123.0).max(100.0), 46.0),
                         Layout::top_down(Align::Min),
                         |ui| {
+                            ui.set_min_width((width - 123.0).max(100.0));
                             ui.strong("Маршрутизация");
                             let routing = &self.client.draft.ipv4_routing;
                             let summary = if routing.by_application {
@@ -470,22 +474,36 @@ impl Desktop {
         };
         let mut save = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new("routing")).show(ctx, |ui| {
-            ui.set_width((ctx.screen_rect().width() - 64.0).clamp(280.0, 530.0));
-            ui.heading("Маршрутизация IPv4");
-            ui.add_space(10.0);
-            routing_fields(ui, routing, &mut self.running_apps, &mut self.client.notice);
-            if let Some((message, true)) = &self.client.notice {
-                ui.colored_label(ERROR, message);
-            }
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                save = pill(ui, "Сохранить", 112.0, true).clicked();
-                cancel = pill(ui, "Отмена", 90.0, false).clicked();
+        let modal = egui::Modal::new(egui::Id::new("routing"))
+            .frame(dialog_frame())
+            .show(ctx, |ui| {
+                ui.set_width((ctx.screen_rect().width() - 64.0).clamp(280.0, 530.0));
+                let picking = self.running_apps.is_open();
+                ui.heading(if picking {
+                    "Запущенные приложения"
+                } else {
+                    "Маршрутизация IPv4"
+                });
+                ui.add_space(10.0);
+                routing_fields(ui, routing, &mut self.running_apps, &mut self.client.notice);
+                if picking {
+                    return;
+                }
+                if let Some((message, true)) = &self.client.notice {
+                    ui.colored_label(ERROR, message);
+                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    save = pill(ui, "Сохранить", 112.0, true).clicked();
+                    cancel = pill(ui, "Отмена", 90.0, false).clicked();
+                });
             });
-        });
         if cancel || modal.should_close() {
-            self.routing = None;
+            if self.running_apps.is_open() {
+                self.running_apps.close();
+            } else {
+                self.routing = None;
+            }
         } else if save {
             let validation = if routing.by_application {
                 routing.application_paths().map(|_| ())
@@ -852,6 +870,11 @@ pub(crate) fn surface(fill: Color32, radius: u8, padding: i8) -> Frame {
     rounded(fill, radius, padding).stroke(Stroke::new(1.0_f32, BORDER))
 }
 
+pub(crate) fn dialog_frame() -> Frame {
+    surface(Color32::from_rgb(30, 29, 46), 24, 23)
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(81, 69, 108)))
+}
+
 fn text(ui: &Ui, origin: egui::Pos2, value: &str, size: f32, color: Color32) {
     ui.painter().text(
         origin,
@@ -984,59 +1007,89 @@ fn routing_fields(
     picker: &mut crate::running_apps::Picker,
     notice: &mut Option<(String, bool)>,
 ) {
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .selectable_label(!routing.split && !routing.by_application, "Весь трафик")
-            .clicked()
-        {
-            routing.split = false;
-            routing.by_application = false;
-        }
-        if ui
-            .selectable_label(routing.split && !routing.by_application, "Список CIDR")
-            .clicked()
-        {
-            routing.split = true;
-            routing.by_application = false;
-        }
-        if ui
-            .selectable_label(routing.by_application, "По приложениям")
-            .clicked()
-        {
-            routing.split = false;
-            routing.by_application = true;
-        }
-    });
-    if routing.by_application {
-        let mut remove = None;
-        for (index, path) in routing.applications.iter().enumerate() {
-            ui.horizontal(|ui| {
-                if ui.small_button("Удалить").clicked() {
-                    remove = Some(index);
-                }
-                ui.add(
-                    egui::Label::new(
-                        path.file_name()
-                            .unwrap_or(path.as_os_str())
-                            .to_string_lossy(),
-                    )
-                    .truncate(),
+    if picker.is_open() && routing.by_application {
+        picker.show(ui, &mut routing.applications);
+        return;
+    }
+    surface(BACKGROUND, 22, 4).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for (label, width, split, apps) in [
+                ("Весь IPv4-трафик", 142.0, false, false),
+                ("Список CIDR", 113.0, true, false),
+                ("По приложениям", 141.0, false, true),
+            ] {
+                if pill(
+                    ui,
+                    label,
+                    width,
+                    routing.split == split && routing.by_application == apps,
                 )
-                .on_hover_text(path.display().to_string());
-            });
-        }
+                .clicked()
+                {
+                    routing.split = split;
+                    routing.by_application = apps;
+                }
+            }
+        });
+    });
+    ui.add_space(12.0);
+    if routing.by_application {
+        ui.label(
+            RichText::new("Через туннель пойдёт TCP-трафик выбранных программ. UDP блокируется.")
+                .color(MUTED),
+        );
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if pill(ui, "Запущенные приложения", 194.0, false).clicked() {
+                picker.open(&routing.applications);
+            }
+            if pill(ui, "Выбрать файл (.exe)", 164.0, false).clicked() {
+                match select_application() {
+                    Ok(Some(path)) => {
+                        crate::running_apps::add_unique(&mut routing.applications, path)
+                    }
+                    Ok(None) => {}
+                    Err(error) => *notice = Some((error, true)),
+                }
+            }
+        });
+        ui.add_space(8.0);
+        let mut remove = None;
+        surface(BACKGROUND, 12, 10).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if routing.applications.is_empty() {
+                ui.label(RichText::new("Приложения пока не выбраны").color(MUTED));
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("tunnel-apps")
+                .max_height(132.0)
+                .show(ui, |ui| {
+                    for (index, path) in routing.applications.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    path.file_name()
+                                        .unwrap_or(path.as_os_str())
+                                        .to_string_lossy(),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(path.display().to_string());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if pill(ui, "×", 40.0, false)
+                                    .on_hover_text("Убрать приложение")
+                                    .clicked()
+                                {
+                                    remove = Some(index);
+                                }
+                            });
+                        });
+                    }
+                });
+        });
         if let Some(index) = remove {
             routing.applications.remove(index);
         }
-        picker.show(ui, &mut routing.applications);
-        if ui.button("Выбрать файл (.exe)").clicked() {
-            match select_application() {
-                Ok(Some(path)) => crate::running_apps::add_unique(&mut routing.applications, path),
-                Ok(None) => {}
-                Err(error) => *notice = Some((error, true)),
-            }
-        }
-        ui.label(RichText::new("Новые TCP-соединения выбранных приложений идут через SSH. UDP выбранных приложений блокируется.").size(12.0).color(MUTED));
     } else if routing.split {
         ui.add(
             egui::TextEdit::multiline(&mut routing.cidrs)
@@ -1049,10 +1102,12 @@ fn routing_fields(
                 .size(12.0)
                 .color(MUTED),
         );
+    } else {
+        ui.label(RichText::new("Через VPN пойдёт весь IPv4-трафик устройства.").color(MUTED));
     }
 }
 
-fn field(ui: &mut Ui, label: &str, value: &mut String, hint: &str, secret: bool) {
+pub(crate) fn field(ui: &mut Ui, label: &str, value: &mut String, hint: &str, secret: bool) {
     rounded(Color32::from_rgb(27, 25, 45), 13, 12)
         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(99, 87, 126)))
         .show(ui, |ui| {

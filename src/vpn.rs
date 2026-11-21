@@ -13,7 +13,7 @@ use std::time::Duration;
 const MTU: usize = 1420;
 const ADAPTER_GUID: u128 = 0x9648bb2f_098b_4d6c_8f35_7c011cdf8651;
 const INSTALLER: &str = include_str!("../install-server.sh");
-const INVITATION_INSTALLER: &str = include_str!("../install-invitations.sh");
+const INVITATION_INSTALLER: &str = crate::invites::INSTALLER;
 const HELLO: &[u8; 8] = b"SSHVPN1\n";
 const INSTALL_REQUEST: &[u8; 8] = b"SSHVPN0\n";
 

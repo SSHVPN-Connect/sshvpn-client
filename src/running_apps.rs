@@ -96,7 +96,7 @@ struct Row {
 
 #[derive(Default)]
 pub struct Picker {
-    visible: bool,
+    selection: Option<Vec<PathBuf>>,
     all_processes: bool,
     search: String,
     rows: Vec<Row>,
@@ -118,20 +118,21 @@ fn contains(paths: &[PathBuf], path: &Path) -> bool {
 }
 
 impl Picker {
+    pub fn is_open(&self) -> bool {
+        self.selection.is_some()
+    }
+
+    pub fn open(&mut self, paths: &[PathBuf]) {
+        self.selection = Some(paths.to_vec());
+        self.search.clear();
+        self.refresh();
+    }
+
+    pub fn close(&mut self) {
+        self.selection = None;
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, paths: &mut Vec<PathBuf>) {
-        if ui
-            .button(if self.visible {
-                "Скрыть запущенные приложения"
-            } else {
-                "Выбрать из запущенных"
-            })
-            .clicked()
-        {
-            self.visible = !self.visible;
-            if self.visible {
-                self.refresh();
-            }
-        }
         if self
             .worker
             .as_ref()
@@ -171,22 +172,29 @@ impl Picker {
                 Err(error) => self.error = Some(error),
             }
         }
-        if !self.visible {
-            return;
-        }
-
+        ui.label(
+            egui::RichText::new("Выберите программы, которые должны работать через туннель.")
+                .color(crate::ui::MUTED),
+        );
+        ui.add_space(8.0);
+        let mut refresh = false;
         ui.horizontal_wrapped(|ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut self.search).hint_text("Поиск по имени или пути"),
+                egui::TextEdit::singleline(&mut self.search)
+                    .desired_width(168.0)
+                    .hint_text("Поиск по имени или пути"),
             );
             ui.checkbox(&mut self.all_processes, "Все процессы");
-            if ui
-                .add_enabled(self.worker.is_none(), egui::Button::new("Обновить список"))
-                .clicked()
-            {
-                self.refresh();
-            }
+            refresh = ui
+                .add_enabled_ui(self.worker.is_none(), |ui| {
+                    crate::ui::pill(ui, "Обновить", 102.0, false)
+                })
+                .inner
+                .clicked();
         });
+        if refresh {
+            self.refresh();
+        }
         if self.worker.is_some() {
             ui.spinner();
             ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -194,6 +202,9 @@ impl Picker {
         if let Some(error) = &self.error {
             ui.label(error);
         }
+        let Some(selection) = &mut self.selection else {
+            return;
+        };
         let search = self.search.trim().to_lowercase();
         let mut matched = false;
         egui::ScrollArea::vertical()
@@ -204,31 +215,63 @@ impl Picker {
                     (row.has_window || self.all_processes) && row.searchable.contains(&search)
                 }) {
                     matched = true;
-                    ui.horizontal(|ui| {
-                        let selected = contains(paths, &row.path);
-                        let button = if selected {
-                            "Добавлено"
-                        } else {
-                            "Добавить"
-                        };
-                        if ui
-                            .add_enabled(!selected, egui::Button::new(button))
-                            .clicked()
-                        {
-                            add_unique(paths, row.path.clone());
-                        }
-                        if let Some(icon) = &row.icon {
-                            ui.image((icon.id(), egui::vec2(20.0, 20.0)));
-                        } else {
-                            ui.allocate_space(egui::vec2(20.0, 20.0));
-                        }
-                        ui.add(egui::Label::new(&row.name).truncate())
-                            .on_hover_text(row.path.display().to_string());
+                    crate::ui::surface(crate::ui::BACKGROUND, 12, 8).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            if let Some(icon) = &row.icon {
+                                ui.image((icon.id(), egui::vec2(20.0, 20.0)));
+                            } else {
+                                ui.allocate_space(egui::vec2(20.0, 20.0));
+                            }
+                            ui.vertical(|ui| {
+                                ui.add(egui::Label::new(&row.name).truncate())
+                                    .on_hover_text(row.path.display().to_string());
+                                if let Some(exe) = row.path.file_name() {
+                                    ui.label(
+                                        egui::RichText::new(exe.to_string_lossy())
+                                            .small()
+                                            .color(crate::ui::MUTED),
+                                    );
+                                }
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let mut selected = contains(selection, &row.path);
+                                    if ui
+                                        .checkbox(&mut selected, "")
+                                        .on_hover_text(&row.name)
+                                        .changed()
+                                    {
+                                        if selected {
+                                            add_unique(selection, row.path.clone());
+                                        } else {
+                                            selection.retain(|path| {
+                                                !contains(std::slice::from_ref(path), &row.path)
+                                            });
+                                        }
+                                    }
+                                },
+                            );
+                        });
                     });
                 }
             });
         if !matched && self.worker.is_none() && self.error.is_none() {
             ui.label("Подходящие приложения не найдены.");
+        }
+        ui.add_space(12.0);
+        let mut apply = false;
+        let mut back = false;
+        ui.horizontal(|ui| {
+            apply = crate::ui::pill(ui, "Применить", 126.0, true).clicked();
+            back = crate::ui::pill(ui, "Назад", 90.0, false).clicked();
+        });
+        if apply {
+            *paths = std::mem::take(selection);
+        }
+        if apply || back {
+            self.close();
         }
     }
 
