@@ -18,7 +18,12 @@ const HELLO: &[u8; 8] = b"SSHVPN1\n";
 const INSTALL_REQUEST: &[u8; 8] = b"SSHVPN0\n";
 
 const VPN_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-vpn ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]"#;
-const INVITATIONS_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-invite ] || [ ! -f /var/lib/ssh-tunnel-invites/installed-v1 ] || [ ! -r /etc/ssh/ssh-tunnel-invites.conf ] || [ ! -r /etc/sudoers.d/ssh-tunnel-invites ] || ! grep -Fxq 'Include /etc/ssh/ssh-tunnel-invites.conf' /etc/ssh/sshd_config"#;
+const INVITATIONS_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-invite ] || [ ! -x /usr/local/libexec/ssh-tunnel-invite-session ] || [ ! -f /var/lib/ssh-tunnel-invites/installed-v2 ] || [ ! -r /etc/ssh/ssh-tunnel-invites.conf ] || [ ! -r /etc/sudoers.d/ssh-tunnel-invites ] || ! grep -Fxq 'Include /etc/ssh/ssh-tunnel-invites.conf' /etc/ssh/sshd_config"#;
+const INVITED_VPN_COMMAND: &str = "ssh-tunnel-vpn";
+
+fn is_invited(profile: &Profile) -> bool {
+    profile.host_key.is_some() && crate::invites::valid_user(&profile.user)
+}
 
 fn server_installer() -> String {
     format!(
@@ -124,8 +129,12 @@ impl Vpn {
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    let installer = server_installer();
-                    let server_command = server_command(installer.len());
+                    let (server_command, installer) = if is_invited(&profile) {
+                        (INVITED_VPN_COMMAND.to_owned(), None)
+                    } else {
+                        let installer = server_installer();
+                        (server_command(installer.len()), Some(installer))
+                    };
                     command.stdin(Stdio::piped()).stdout(Stdio::piped()).args([
                         "-4",
                         "-o",
@@ -146,8 +155,16 @@ impl Vpn {
                     let (frames_tx, frames_rx) = mpsc::sync_channel(128);
                     thread::spawn(move || read_packets(stdout, hello_tx, frames_tx));
                     let first = wait_for_greeting(&hello_rx, Duration::from_secs(22))
-                        .map_err(|error| ssh_error(&mut diagnostics, error))?;
+                        .map_err(|error| {
+                            let error = ssh_error(&mut diagnostics, error);
+                            if installer.is_none() {
+                                format!("Подключение по приглашению не запустилось. Попросите владельца подключиться обновлённым клиентом в режиме System VPN (IPv4).\n{error}")
+                            } else {
+                                error
+                            }
+                        })?;
                     if first == Greeting::Install {
+                        let installer = installer.ok_or("Сервер запросил установку для профиля по приглашению.")?;
                         tx.send(Ok(Status::Installing)).map_err(|e| e.to_string())?;
                         stdin.write_all(installer.as_bytes())
                             .map_err(|e| ssh_error(&mut diagnostics, format!("Could not upload server installer: {e}")))?;
@@ -490,7 +507,7 @@ mod tests {
         assert!(!installer.contains('\r'));
         assert!(installer.contains(&format!("if {VPN_REQUIRED}; then\n(")));
         assert!(installer.contains(&format!("if {INVITATIONS_REQUIRED}; then\n(")));
-        assert!(installer.contains("touch /var/lib/ssh-tunnel-invites/installed-v1"));
+        assert!(installer.contains("/var/lib/ssh-tunnel-invites/installed-v2"));
         let command = server_command(installer.len());
         assert!(command.contains(&format!(
             "if {VPN_REQUIRED} || {INVITATIONS_REQUIRED}; then"

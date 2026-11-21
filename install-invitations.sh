@@ -31,6 +31,8 @@ import tempfile
 KEYS = Path("/etc/ssh/ssh-tunnel-invites")
 STATE = Path("/var/lib/ssh-tunnel-invites")
 OWNER = "/usr/local/libexec/ssh-tunnel-invite"
+SESSION = "/usr/local/libexec/ssh-tunnel-invite-session"
+LEGACY_KEY = 'restrict,port-forwarding,command="/bin/false" '
 
 
 def public_key(value):
@@ -97,8 +99,26 @@ def redeem(data):
         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%SZ")
         if not match or match[1] <= now:
             raise ValueError("Invitation was already used or has expired.")
-        write_key(KEYS / user, f'restrict,port-forwarding,command="/bin/false" {key}')
+        write_session_key(user, key)
     return {"user": user}
+
+
+def write_session_key(user, key):
+    write_key(KEYS / user, f'restrict,port-forwarding,command="{SESSION}" {key}')
+
+
+def upgrade():
+    for path in KEYS.iterdir():
+        if not re.fullmatch(r"stv_[0-9a-f]{16}", path.name):
+            continue
+        with (STATE / path.name).open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                saved = path.read_text().strip()
+            except FileNotFoundError:
+                continue
+            if saved.startswith(LEGACY_KEY):
+                write_session_key(path.name, public_key(saved[len(LEGACY_KEY):]))
 
 
 def revoke(data):
@@ -120,6 +140,9 @@ if __name__ == "__main__":
         operation = sys.argv[1]
         if bool(os.environ.get("SUDO_USER")) != (operation == "redeem"):
             raise ValueError("Unauthorized operation.")
+        if operation == "upgrade":
+            upgrade()
+            sys.exit(0)
         result = {"issue": issue, "redeem": redeem, "revoke": revoke}[operation](request())
         print(json.dumps(result))
     except (OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
@@ -127,7 +150,20 @@ if __name__ == "__main__":
         sys.exit(1)
 PYTHON
 install -m 0755 "$temp" /usr/local/libexec/ssh-tunnel-invite
-printf '%s\n' '%ssh-tunnel-share ALL=(root) NOPASSWD: /usr/local/libexec/ssh-tunnel-invite redeem' > "$temp"
+cat > "$temp" <<'SESSION'
+#!/bin/sh
+set -eu
+if [ "${SSH_ORIGINAL_COMMAND-}" != "ssh-tunnel-vpn" ]; then
+    exit 1
+fi
+if [ ! -x /usr/local/libexec/ssh-tunnel-vpn ]; then
+    echo 'System IPv4 VPN is unavailable. Ask the owner to connect in System VPN mode first.' >&2
+    exit 1
+fi
+exec /usr/bin/sudo -n -- /usr/local/libexec/ssh-tunnel-vpn
+SESSION
+install -m 0755 "$temp" /usr/local/libexec/ssh-tunnel-invite-session
+printf '%s\n' '%ssh-tunnel-share ALL=(root) NOPASSWD: /usr/local/libexec/ssh-tunnel-invite redeem, /usr/local/libexec/ssh-tunnel-vpn ""' > "$temp"
 visudo -cf "$temp" >/dev/null
 install -m 0440 "$temp" /etc/sudoers.d/ssh-tunnel-invites
 cat > "$temp" <<'SSHD'
@@ -159,5 +195,6 @@ if ! systemctl reload ssh; then
     install -m 0644 "$temp" /etc/ssh/sshd_config
     exit 1
 fi
-touch /var/lib/ssh-tunnel-invites/installed-v1
+env -u SUDO_USER /usr/local/libexec/ssh-tunnel-invite upgrade
+touch /var/lib/ssh-tunnel-invites/installed-v1 /var/lib/ssh-tunnel-invites/installed-v2
 printf '%s\n' 'SSH Tunnel invitations are installed on port 22.'

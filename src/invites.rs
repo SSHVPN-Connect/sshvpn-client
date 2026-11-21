@@ -115,7 +115,7 @@ pub fn valid_public_key(key: &str) -> bool {
         .is_ok_and(|data| data.len() == 51 && data.starts_with(b"\0\0\0\x0bssh-ed25519\0\0\0\x20"))
 }
 
-fn valid_user(user: &str) -> bool {
+pub(crate) fn valid_user(user: &str) -> bool {
     user.strip_prefix("stv_").is_some_and(|id| {
         id.len() == 16
             && id

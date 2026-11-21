@@ -130,7 +130,7 @@ impl InviteUi {
                         client.editing = false;
                         client.report(
                             Ok(()),
-                            Some("Приглашение активировано. Профиль SOCKS5 сохранён."),
+                            Some("Приглашение активировано. Режим можно выбрать рядом с кнопкой подключения."),
                         );
                         *self = Self::default();
                         return;
