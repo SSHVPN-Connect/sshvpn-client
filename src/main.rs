@@ -1,13 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
 
 mod askpass;
 mod credentials;
 mod elevation;
 mod profiles;
 mod tunnel;
+mod ui;
 mod vpn;
 use profiles::{Authentication, Mode, Profiles, SavedProfile};
 use tunnel::Tunnel;
@@ -41,14 +42,6 @@ impl Connection {
     }
 }
 
-const BACKGROUND: egui::Color32 = egui::Color32::from_rgb(13, 19, 28);
-const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(17, 25, 37);
-const SURFACE: egui::Color32 = egui::Color32::from_rgb(23, 34, 48);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(45, 62, 79);
-const TEXT: egui::Color32 = egui::Color32::from_rgb(235, 242, 247);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(164, 183, 201);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(88, 226, 194);
-
 struct Client {
     directory: Result<std::path::PathBuf, String>,
     profiles: Profiles,
@@ -56,6 +49,8 @@ struct Client {
     local_port: String,
     password: String,
     tunnel: Option<Connection>,
+    disconnecting: Option<JoinHandle<std::io::Result<()>>>,
+    next_profile: Option<usize>,
     notice: Option<(String, bool)>,
     confirming_delete: bool,
     editing: bool,
@@ -82,11 +77,14 @@ impl Client {
             local_port: String::new(),
             password: String::new(),
             tunnel: None,
+            disconnecting: None,
+            next_profile: None,
             notice,
             confirming_delete: false,
             editing: false,
         };
         client.load_selection();
+        client.editing = false;
         client
     }
 
@@ -228,15 +226,39 @@ impl Client {
         Ok(())
     }
 
-    fn disconnect(&mut self) -> Result<(), String> {
-        if let Some(tunnel) = &mut self.tunnel {
-            tunnel.stop().map_err(|error| error.to_string())?;
-            self.tunnel = None;
+    fn disconnect(&mut self) {
+        if let Some(mut tunnel) = self.tunnel.take() {
+            self.disconnecting = Some(thread::spawn(move || tunnel.stop()));
         }
-        Ok(())
+    }
+
+    fn poll_disconnect(&mut self) {
+        if self
+            .disconnecting
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            let result = self
+                .disconnecting
+                .take()
+                .expect("disconnect worker")
+                .join()
+                .map_err(|_| "VPN cleanup worker stopped unexpectedly.".to_owned())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let next = self.next_profile.take();
+            if let Err(error) = result {
+                self.report(Err(error), None);
+            } else if let Some(index) = next {
+                let result = self.connect_profile(index);
+                self.report(result, None);
+            }
+        }
     }
 
     fn connect_profile(&mut self, index: usize) -> Result<(), String> {
+        if self.disconnecting.is_some() {
+            return Err("Дождитесь завершения отключения.".into());
+        }
         if self.tunnel.is_some() && self.profiles.selected == Some(index) {
             return Ok(());
         }
@@ -252,7 +274,11 @@ impl Client {
             }
             Err(error) => return Err(error),
         };
-        self.disconnect()?;
+        if self.tunnel.is_some() {
+            self.next_profile = Some(index);
+            self.disconnect();
+            return Ok(());
+        }
         self.select(Some(index))?;
         self.editing = false;
         self.start_connection(profile, secret)
@@ -271,8 +297,12 @@ impl Client {
     }
 
     fn toggle_connection(&mut self) -> Result<(), String> {
+        if self.disconnecting.is_some() {
+            return Err("Дождитесь завершения отключения.".into());
+        }
         if self.tunnel.is_some() {
-            return self.disconnect();
+            self.disconnect();
+            return Ok(());
         }
         if let Some(index) = self.profiles.selected.filter(|_| !self.editing) {
             return self.connect_profile(index);
@@ -305,363 +335,6 @@ impl Client {
             Err(error) => Some((error, true)),
         };
     }
-
-    fn sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("profiles")
-            .exact_width(218.0)
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(SIDEBAR)
-                    .inner_margin(egui::Margin::same(18)),
-            )
-            .show(ctx, |ui| {
-                ui.label(egui::RichText::new("SSH Tunnel").size(24.0).strong());
-                ui.add_space(26.0);
-                ui.label(egui::RichText::new("Profiles").size(15.0).strong());
-                ui.add_space(8.0);
-                let manage = self.tunnel.is_none() && self.directory.is_ok();
-                let button = egui::Button::new("+  New profile")
-                    .min_size(egui::vec2(ui.available_width(), 34.0))
-                    .stroke(egui::Stroke::new(1.0_f32, BORDER));
-                if ui.add_enabled(manage, button).clicked() {
-                    let result = self.select(None);
-                    self.report(result, None);
-                }
-                ui.add_space(12.0);
-                if self.profiles.entries.is_empty() {
-                    ui.label(egui::RichText::new("No saved profiles yet").color(MUTED));
-                }
-                let mut connect = None;
-                let mut edit = None;
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (index, profile) in self.profiles.entries.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            let selected = self.profiles.selected == Some(index);
-                            let width = (ui.available_width() - 50.0).max(50.0);
-                            let button = egui::Button::new(
-                                egui::RichText::new(&profile.name).color(if selected {
-                                    ACCENT
-                                } else {
-                                    TEXT
-                                }),
-                            )
-                            .min_size(egui::vec2(width, 36.0))
-                            .truncate()
-                            .fill(if selected { SURFACE } else { SIDEBAR })
-                            .stroke(egui::Stroke::new(
-                                1.0_f32,
-                                if selected { BORDER } else { SIDEBAR },
-                            ));
-                            if ui
-                                .add(button)
-                                .on_hover_text(format!(
-                                    "Connect · {} · {}",
-                                    profile.connection.server,
-                                    profile.mode.label()
-                                ))
-                                .clicked()
-                            {
-                                connect = Some(index);
-                            }
-                            if ui
-                                .add_enabled(manage, egui::Button::new("Edit"))
-                                .on_hover_text(format!("Edit {}", profile.name))
-                                .clicked()
-                            {
-                                edit = Some(index);
-                            }
-                        });
-                    }
-                });
-                if let Some(index) = connect {
-                    let result = self.connect_profile(index);
-                    self.report(result, None);
-                }
-                if let Some(index) = edit {
-                    let result = self.select(Some(index));
-                    if result.is_ok() {
-                        self.editing = true;
-                    }
-                    self.report(result, None);
-                }
-            });
-    }
-
-    fn connection_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let active = self.tunnel.is_some();
-        let ready = self.tunnel.as_ref().is_some_and(Connection::is_ready);
-        let (status, action, color) = if ready {
-            ("Connected", "Disconnect", ACCENT)
-        } else if active {
-            (
-                "Connecting…",
-                "Cancel",
-                egui::Color32::from_rgb(246, 195, 117),
-            )
-        } else {
-            ("Disconnected", "Connect", MUTED)
-        };
-        card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
-                ui.painter()
-                    .circle_filled(rect.center(), 27.0, color.gamma_multiply(0.13));
-                ui.painter().circle_stroke(
-                    rect.center(),
-                    26.0,
-                    egui::Stroke::new(1.0_f32, color.gamma_multiply(0.5)),
-                );
-                ui.painter().circle_filled(rect.center(), 7.0, color);
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.label(egui::RichText::new(status).size(23.0).strong());
-                    if !self.draft.connection.server.trim().is_empty() {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&self.draft.connection.server).color(MUTED),
-                            )
-                            .truncate(),
-                        );
-                    }
-                });
-            });
-            ui.add_space(14.0);
-            let button = egui::Button::new(
-                egui::RichText::new(action)
-                    .size(16.0)
-                    .strong()
-                    .color(if active { TEXT } else { BACKGROUND }),
-            )
-            .fill(if active { BACKGROUND } else { ACCENT })
-            .stroke(egui::Stroke::new(
-                1.0_f32,
-                if active { BORDER } else { ACCENT },
-            ))
-            .corner_radius(8.0);
-            ui.horizontal_wrapped(|ui| {
-                let button_width = (ui.available_width() - 168.0).max(104.0);
-                if ui.add_sized([button_width, 42.0], button).clicked() {
-                    let result = self.toggle_connection();
-                    self.report(result, None);
-                }
-                let mut mode = self.draft.mode;
-                ui.add_enabled_ui(self.tunnel.is_none(), |ui| {
-                    egui::ComboBox::from_id_salt("connection_mode")
-                        .width(145.0)
-                        .selected_text(mode.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut mode,
-                                Mode::SystemVpn,
-                                Mode::SystemVpn.label(),
-                            );
-                            ui.selectable_value(&mut mode, Mode::Socks5, Mode::Socks5.label());
-                        });
-                });
-                if mode != self.draft.mode {
-                    let result = self.set_mode(mode);
-                    self.report(result, None);
-                }
-            });
-            if let Some(Connection::Socks(tunnel)) =
-                self.tunnel.as_ref().filter(|tunnel| tunnel.is_ready())
-            {
-                let endpoint = tunnel.endpoint().to_string();
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.monospace(&endpoint);
-                    if ui.button("Copy proxy address").clicked() {
-                        ctx.copy_text(endpoint);
-                    }
-                });
-            }
-        });
-    }
-
-    fn profile_editor(&mut self, ui: &mut egui::Ui) {
-        let active = self.tunnel.is_some();
-        card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                egui::RichText::new("Connection settings")
-                    .size(17.0)
-                    .strong(),
-            );
-            ui.add_space(10.0);
-            ui.add_enabled_ui(!active, |ui| {
-                field(
-                    ui,
-                    "Profile name",
-                    &mut self.draft.name,
-                    "e.g. Home or Office",
-                    false,
-                );
-                field(
-                    ui,
-                    "SSH server · port 22",
-                    &mut self.draft.connection.server,
-                    "server.example.com",
-                    false,
-                );
-                field(
-                    ui,
-                    "SSH username",
-                    &mut self.draft.connection.user,
-                    "Username",
-                    false,
-                );
-                let previous = self.draft.authentication;
-                ui.horizontal(|ui| {
-                    ui.selectable_value(
-                        &mut self.draft.authentication,
-                        Authentication::Password,
-                        "Password",
-                    );
-                    ui.selectable_value(
-                        &mut self.draft.authentication,
-                        Authentication::Key,
-                        "SSH key",
-                    );
-                });
-                if previous != self.draft.authentication {
-                    self.password.clear();
-                }
-                if self.draft.authentication == Authentication::Key {
-                    field(
-                        ui,
-                        "Private key path (optional)",
-                        &mut self.draft.connection.key,
-                        "C:\\Users\\you\\.ssh\\id_ed25519",
-                        false,
-                    );
-                }
-                let secret_label = if self.draft.authentication == Authentication::Password {
-                    "SSH password"
-                } else {
-                    "Key passphrase (optional)"
-                };
-                let hint = if self.draft.encrypted_secret.is_some() {
-                    "Saved · enter a replacement to change"
-                } else {
-                    ""
-                };
-                field(ui, secret_label, &mut self.password, hint, true);
-                if self.draft.encrypted_secret.is_some()
-                    && ui.button("Forget saved credential").clicked()
-                {
-                    self.draft.encrypted_secret = None;
-                    self.password.clear();
-                }
-                if self.draft.mode == Mode::Socks5 {
-                    field(ui, "Local SOCKS5 port", &mut self.local_port, "1080", false);
-                }
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(self.directory.is_ok(), egui::Button::new("Save profile"))
-                        .clicked()
-                    {
-                        let result = self.save_profile();
-                        self.report(result, Some("Profile saved."));
-                    }
-                    if self.dirty() && ui.button("Discard changes").clicked() {
-                        self.load_selection();
-                        self.notice = None;
-                    }
-                    if self.profiles.selected.is_some() && ui.button("Delete profile").clicked() {
-                        self.confirming_delete = true;
-                    }
-                });
-                if self.confirming_delete {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Delete this saved profile?");
-                        if ui.button("Delete").clicked() {
-                            let result = self.delete_profile();
-                            self.report(result, Some("Profile deleted."));
-                        }
-                        if ui.button("Keep profile").clicked() {
-                            self.confirming_delete = false;
-                        }
-                    });
-                }
-            });
-        });
-    }
-}
-
-fn card() -> egui::Frame {
-    egui::Frame::new()
-        .fill(SURFACE)
-        .stroke(egui::Stroke::new(1.0_f32, BORDER))
-        .corner_radius(12)
-        .inner_margin(egui::Margin::same(16))
-}
-
-fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, secret: bool) {
-    ui.label(egui::RichText::new(label).color(MUTED));
-    ui.add(
-        egui::TextEdit::singleline(value)
-            .hint_text(hint)
-            .password(secret)
-            .desired_width(f32::INFINITY)
-            .margin(egui::Margin::symmetric(9, 6)),
-    );
-    ui.add_space(6.0);
-}
-
-impl eframe::App for Client {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(tunnel) = &mut self.tunnel {
-            if let Err(error) = tunnel.poll() {
-                self.notice = Some((error, true));
-                self.tunnel = None;
-            } else {
-                ctx.request_repaint_after(Duration::from_millis(400));
-            }
-        }
-        self.sidebar(ctx);
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(BACKGROUND)
-                    .inner_margin(egui::Margin::same(22)),
-            )
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let title = self.draft.name.trim();
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(if title.is_empty() {
-                                "New profile"
-                            } else {
-                                title
-                            })
-                            .size(26.0)
-                            .strong(),
-                        )
-                        .truncate(),
-                    );
-                    ui.add_space(12.0);
-                    self.connection_card(ui, ctx);
-                    if let Some((notice, error)) = &self.notice {
-                        ui.add_space(8.0);
-                        let color = if *error {
-                            egui::Color32::from_rgb(255, 177, 164)
-                        } else {
-                            ACCENT
-                        };
-                        ui.label(egui::RichText::new(notice).color(color));
-                    }
-                    if self.editing {
-                        ui.add_space(14.0);
-                        self.profile_editor(ui);
-                    }
-                });
-            });
-    }
 }
 
 #[cfg(test)]
@@ -678,6 +351,8 @@ mod tests {
             local_port: "1080".into(),
             password: "in-memory secret".into(),
             tunnel: None,
+            disconnecting: None,
+            next_profile: None,
             notice: None,
             confirming_delete: false,
             editing: true,
@@ -736,6 +411,21 @@ mod tests {
         assert!(client.draft.encrypted_secret.is_none());
         client.delete_profile().unwrap();
         assert_eq!(client.draft.name, "Home");
+
+        let (finish, wait) = std::sync::mpsc::channel();
+        client.disconnecting = Some(thread::spawn(move || {
+            wait.recv().unwrap();
+            Ok(())
+        }));
+        client.poll_disconnect();
+        assert!(client.disconnecting.is_some());
+        finish.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while client.disconnecting.is_some() && std::time::Instant::now() < deadline {
+            client.poll_disconnect();
+            thread::yield_now();
+        }
+        assert!(client.disconnecting.is_none());
     }
 }
 
@@ -750,24 +440,19 @@ fn main() -> eframe::Result {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([790.0, 730.0])
-            .with_min_inner_size([585.0, 515.0]),
+            .with_inner_size([1000.0, 660.0])
+            .with_min_inner_size([700.0, 520.0]),
         ..Default::default()
     };
     eframe::run_native(
         "SSH Tunnel",
         options,
         Box::new(move |cc| {
-            let mut visuals = egui::Visuals::dark();
-            visuals.override_text_color = Some(TEXT);
-            visuals.extreme_bg_color = BACKGROUND;
-            visuals.selection.bg_fill = BORDER;
-            cc.egui_ctx.set_visuals(visuals);
             let mut client = Client::new();
             if elevation_notice.is_some() && client.notice.is_none() {
                 client.notice = elevation_notice;
             }
-            Ok(Box::new(client))
+            Ok(Box::new(ui::Desktop::new(&cc.egui_ctx, client)?))
         }),
     )
 }

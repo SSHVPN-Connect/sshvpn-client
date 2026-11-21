@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::io::{self, Read, Seek};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, TcpListener};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -164,7 +164,13 @@ pub fn ssh_command(
 
 pub fn ssh_error(diagnostics: &mut fs::File, fallback: String) -> String {
     let mut bytes = Vec::new();
-    if diagnostics.rewind().is_ok() {
+    let start = diagnostics
+        .metadata()
+        .map(|metadata| metadata.len().saturating_sub(8192));
+    if start
+        .and_then(|start| diagnostics.seek(SeekFrom::Start(start)))
+        .is_ok()
+    {
         let _ = diagnostics.take(8192).read_to_end(&mut bytes);
     }
     let message = String::from_utf8_lossy(&bytes).trim().to_owned();

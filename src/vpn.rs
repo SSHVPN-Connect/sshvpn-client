@@ -11,14 +11,57 @@ use std::time::Duration;
 
 const MTU: usize = 1420;
 const ADAPTER_GUID: u128 = 0x9648bb2f_098b_4d6c_8f35_7c011cdf8651;
+const INSTALLER: &str = include_str!("../install-server.sh");
 const HELLO: &[u8; 8] = b"SSHVPN1\n";
+const INSTALL_REQUEST: &[u8; 8] = b"SSHVPN0\n";
+
+fn server_command(installer_size: usize) -> String {
+    format!(
+        r#"set -eu
+handler=/usr/local/libexec/ssh-tunnel-vpn
+if [ "$(id -u)" -ne 0 ]; then
+    echo 'System VPN requires an SSH login as root.' >&2
+    exit 1
+fi
+if [ ! -x "$handler" ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
+    (
+        umask 077
+        printf 'SSHVPN0\n'
+        script=$(mktemp /tmp/ssh-tunnel-install.XXXXXX)
+        trap 'rm -f "$script"' EXIT
+        head -c {installer_size} > "$script"
+        if [ "$(wc -c < "$script")" -ne {installer_size} ]; then
+            echo 'Server installer transfer was interrupted.' >&2
+            exit 1
+        fi
+        flock -w 120 9
+        if [ ! -x "$handler" ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
+            sh "$script" </dev/null >&2
+        fi
+    ) 9>/run/ssh-tunnel-vpn-install.lock
+fi
+exec "$handler""#
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Greeting {
+    Install,
+    Ready,
+}
+
+enum Status {
+    Installing,
+    Ready,
+}
 
 pub struct Vpn {
     child: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
-    status: mpsc::Receiver<Result<(), String>>,
+    status: mpsc::Receiver<Result<Status, String>>,
     worker: Option<JoinHandle<()>>,
     ready: bool,
+    installing: bool,
 }
 
 impl Vpn {
@@ -63,16 +106,20 @@ impl Vpn {
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Ok(());
                     }
+                    let installer = INSTALLER.replace("\r\n", "\n");
+                    let server_command = server_command(installer.len());
                     command.stdin(Stdio::piped()).stdout(Stdio::piped()).args([
                         "-4",
                         "-o",
                         &format!("HostKeyAlias={}", profile.server),
+                        "-o",
+                        "LogLevel=ERROR",
                         "--",
                         &ip.to_string(),
-                        "/usr/local/libexec/ssh-tunnel-vpn",
+                        &server_command,
                     ]);
                     let mut ssh = command.spawn().map_err(|e| e.to_string())?;
-                    let stdin = ssh.stdin.take().expect("piped SSH stdin");
+                    let mut stdin = ssh.stdin.take().expect("piped SSH stdin");
                     let stdout = ssh.stdout.take().expect("piped SSH stdout");
                     *process = Some(ssh);
                     drop(process);
@@ -80,28 +127,35 @@ impl Vpn {
                     let (hello_tx, hello_rx) = mpsc::channel();
                     let (frames_tx, frames_rx) = mpsc::sync_channel(128);
                     thread::spawn(move || read_packets(stdout, hello_tx, frames_tx));
-                    match hello_rx.recv_timeout(Duration::from_secs(22)) {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            return Err(ssh_error(&mut diagnostics, error.to_string()))
-                        }
-                        Err(error) => {
-                            return Err(ssh_error(
-                                &mut diagnostics,
-                                format!("VPN handshake: {error}"),
-                            ))
+                    let first = wait_for_greeting(&hello_rx, Duration::from_secs(22))
+                        .map_err(|error| ssh_error(&mut diagnostics, error))?;
+                    if first == Greeting::Install {
+                        tx.send(Ok(Status::Installing)).map_err(|e| e.to_string())?;
+                        stdin.write_all(installer.as_bytes())
+                            .map_err(|e| ssh_error(&mut diagnostics, format!("Could not upload server installer: {e}")))?;
+                        let second = wait_for_greeting(&hello_rx, Duration::from_secs(600))
+                            .map_err(|error| format!("Server installation failed: {}", ssh_error(&mut diagnostics, error)))?;
+                        if second != Greeting::Ready {
+                            return Err("Unexpected server installer response.".into());
                         }
                     }
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    let adapter =
-                        wintun::Adapter::create(&driver, "SSH Tunnel VPN", "SSH Tunnel", Some(ADAPTER_GUID))
-                            .map_err(|e| {
-                                format!(
-                                    "Could not create Wintun adapter. Run as administrator. {e}"
-                                )
-                            })?;
+                    // The crate gives adapter-creation failures a generic message.
+                    unsafe { windows_sys::Win32::Foundation::SetLastError(0) };
+                    let adapter_result =
+                        wintun::Adapter::create(&driver, "SSH Tunnel VPN", "SSH Tunnel", Some(ADAPTER_GUID));
+                    let windows_error = io::Error::last_os_error();
+                    let adapter = adapter_result.map_err(|error| {
+                        if matches!(&error, wintun::Error::String(message) if message == "Failed to create adapter")
+                            && windows_error.raw_os_error().is_some_and(|code| code != 0)
+                        {
+                            format!("Не удалось создать адаптер Wintun: {windows_error}")
+                        } else {
+                            format!("Не удалось создать адаптер Wintun: {error}")
+                        }
+                    })?;
                     let index = adapter.get_adapter_index().map_err(|e| e.to_string())?;
                     let session = Arc::new(
                         adapter
@@ -110,7 +164,7 @@ impl Vpn {
                     );
                     let mut routes = Routes::new(index, ip);
                     routes.apply()?;
-                    tx.send(Ok(())).map_err(|e| e.to_string())?;
+                    tx.send(Ok(Status::Ready)).map_err(|e| e.to_string())?;
                     let result = forward(&session, stdin, frames_rx);
                     let cleanup = routes.remove();
                     result.and(cleanup)
@@ -130,16 +184,20 @@ impl Vpn {
             status,
             worker: Some(worker),
             ready: false,
+            installing: false,
         })
     }
 
     pub fn poll(&mut self) -> Result<(), String> {
         loop {
             match self.status.try_recv() {
-                Ok(event) => {
-                    event?;
-                    self.ready = true;
-                }
+                Ok(event) => match event? {
+                    Status::Installing => self.installing = true,
+                    Status::Ready => {
+                        self.installing = false;
+                        self.ready = true;
+                    }
+                },
                 Err(mpsc::TryRecvError::Empty) => return Ok(()),
                 Err(mpsc::TryRecvError::Disconnected) => return Err("VPN worker stopped.".into()),
             }
@@ -148,6 +206,10 @@ impl Vpn {
 
     pub fn is_ready(&self) -> bool {
         self.ready
+    }
+
+    pub fn is_installing(&self) -> bool {
+        self.installing
     }
 
     pub fn stop(&mut self) -> io::Result<()> {
@@ -172,23 +234,44 @@ impl Drop for Vpn {
     }
 }
 
+fn wait_for_greeting(
+    hello: &mpsc::Receiver<io::Result<Greeting>>,
+    timeout: Duration,
+) -> Result<Greeting, String> {
+    hello
+        .recv_timeout(timeout)
+        .map_err(|error| format!("VPN handshake: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+fn read_greeting(reader: &mut impl Read) -> io::Result<Greeting> {
+    let mut greeting = [0; HELLO.len()];
+    reader.read_exact(&mut greeting)?;
+    match &greeting {
+        HELLO => Ok(Greeting::Ready),
+        INSTALL_REQUEST => Ok(Greeting::Install),
+        _ => Err(io::Error::other("Unexpected VPN server handshake.")),
+    }
+}
+
 fn read_packets(
     pipe: impl Read,
-    hello: mpsc::Sender<io::Result<()>>,
+    hello: mpsc::Sender<io::Result<Greeting>>,
     frames: mpsc::SyncSender<io::Result<Vec<u8>>>,
 ) {
     let mut reader = BufReader::new(pipe);
-    let mut greeting = [0; HELLO.len()];
-    let result = reader.read_exact(&mut greeting).and_then(|()| {
-        if &greeting == HELLO {
-            Ok(())
-        } else {
-            Err(io::Error::other("Unexpected VPN server handshake."))
-        }
-    });
-    let ready = result.is_ok();
-    if hello.send(result).is_err() || !ready {
+    let first = read_greeting(&mut reader);
+    let requested_install = matches!(&first, Ok(Greeting::Install));
+    let valid = first.is_ok();
+    if hello.send(first).is_err() || !valid {
         return;
+    }
+    if requested_install {
+        let second = read_greeting(&mut reader);
+        let ready = matches!(&second, Ok(Greeting::Ready));
+        if hello.send(second).is_err() || !ready {
+            return;
+        }
     }
     loop {
         let result = (|| {
@@ -364,7 +447,35 @@ fn powershell(script: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::powershell;
+    use super::*;
+
+    #[test]
+    fn vpn_stream_accepts_optional_install_request_before_packet_frames() {
+        for install in [false, true] {
+            let mut stream = Vec::new();
+            if install {
+                stream.extend_from_slice(INSTALL_REQUEST);
+            }
+            stream.extend_from_slice(HELLO);
+            stream.extend_from_slice(&20_u16.to_be_bytes());
+            let mut packet = [0; 20];
+            packet[0] = 0x45;
+            stream.extend_from_slice(&packet);
+            let (greetings, received) = mpsc::channel();
+            let (frames, packets) = mpsc::sync_channel(2);
+
+            read_packets(stream.as_slice(), greetings, frames);
+
+            if install {
+                assert!(matches!(
+                    received.recv().unwrap().unwrap(),
+                    Greeting::Install
+                ));
+            }
+            assert!(matches!(received.recv().unwrap().unwrap(), Greeting::Ready));
+            assert_eq!(packets.recv().unwrap().unwrap(), packet);
+        }
+    }
 
     #[test]
     fn powershell_runs_multiline_scripts_and_reports_utf8_errors() {

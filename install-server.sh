@@ -29,7 +29,7 @@ done
 
 if [ "$#" -gt 0 ]; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends "$@"
 fi
 
 dpkg-query -W -f='${Package} ${Version}\n' openssh-server iproute2 nftables iptables python3
