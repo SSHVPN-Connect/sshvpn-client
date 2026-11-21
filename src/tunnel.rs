@@ -76,7 +76,7 @@ pub struct Tunnel {
     netstat: PathBuf,
     next_probe: Instant,
     ready: bool,
-    _known_host: Option<tempfile::NamedTempFile>,
+    _known_host: Option<tempfile::TempDir>,
 }
 
 impl Tunnel {
@@ -133,26 +133,73 @@ impl Tunnel {
 pub fn pin_host(
     command: &mut Command,
     profile: &Profile,
-) -> Result<Option<tempfile::NamedTempFile>, String> {
-    use std::io::Write as _;
+) -> Result<Option<tempfile::TempDir>, String> {
     let Some(ref key) = profile.host_key else {
         return Ok(None);
     };
     if !crate::invites::valid_public_key(key) {
         return Err("Неверный публичный ключ SSH-сервера.".into());
     }
-    let mut file = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-    writeln!(file, "{} {key}", profile.server).map_err(|e| e.to_string())?;
-    file.flush().map_err(|e| e.to_string())?;
+    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = directory.path().join("known_hosts");
+    let host = profile.server.to_ascii_lowercase();
+    // Close the file before Windows OpenSSH opens it with its own sharing mode.
+    fs::write(&path, format!("{host} {key}\n")).map_err(|e| e.to_string())?;
     command.args([
         "-o",
-        &format!("UserKnownHostsFile=\"{}\"", file.path().display()),
+        &format!("UserKnownHostsFile=\"{}\"", path.display()),
         "-o",
         "GlobalKnownHostsFile=none",
         "-o",
         "HostKeyAlgorithms=ssh-ed25519",
+        "-o",
+        &format!("HostKeyAlias={host}"),
     ]);
-    Ok(Some(file))
+    Ok(Some(directory))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    #[test]
+    fn openssh_can_read_the_pinned_host_file_while_the_profile_is_active() {
+        let mut key = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        key.extend([42; 32]);
+        let profile = Profile {
+            server: "Test.Example".into(),
+            user: "test".into(),
+            host_key: Some(format!("ssh-ed25519 {}", STANDARD.encode(key))),
+            ..Profile::default()
+        };
+        let (mut ssh, _) = ssh_command(&profile, false, String::new()).unwrap();
+        let pin = pin_host(&mut ssh, &profile).unwrap().unwrap();
+        let config = ssh.args(["-G", "--", "127.0.0.1"]).output().unwrap();
+        assert!(config.status.success());
+        let config = String::from_utf8(config.stdout).unwrap();
+        assert!(config
+            .lines()
+            .any(|line| line == "stricthostkeychecking true"));
+        let host = config
+            .lines()
+            .find_map(|line| line.strip_prefix("hostkeyalias "))
+            .unwrap();
+        assert_eq!(host, "test.example");
+        let path = config
+            .lines()
+            .find_map(|line| line.strip_prefix("userknownhostsfile "))
+            .unwrap();
+        assert_eq!(Path::new(path), pin.path().join("known_hosts"));
+        let lookup = Command::new(system_program(r"OpenSSH\ssh-keygen.exe").unwrap())
+            .args(["-F", host, "-f", path])
+            .output()
+            .unwrap();
+        assert!(lookup.status.success(), "{:?}", lookup);
+        assert!(
+            String::from_utf8_lossy(&lookup.stdout).contains(profile.host_key.as_deref().unwrap())
+        );
+    }
 }
 
 pub fn ssh_command(
