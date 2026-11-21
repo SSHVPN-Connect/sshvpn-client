@@ -3,6 +3,7 @@ use eframe::egui::{
     self, pos2, vec2, Align, Align2, Color32, FontId, Frame, Layout, Rect, Response, RichText,
     Sense, Stroke, StrokeKind, Ui,
 };
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const BACKGROUND: Color32 = Color32::from_rgb(13, 13, 23);
@@ -98,6 +99,7 @@ pub struct Desktop {
     client: Client,
     assets: Assets,
     closing: bool,
+    update: Option<JoinHandle<Result<Option<std::path::PathBuf>, String>>>,
 }
 
 impl Desktop {
@@ -111,6 +113,7 @@ impl Desktop {
             client,
             assets: Assets::load(ctx)?,
             closing: false,
+            update: None,
         })
     }
 
@@ -148,7 +151,7 @@ impl Desktop {
 
             let mut selected = None;
             let mut editing = None;
-            let list_height = (height - 255.0).max(100.0);
+            let list_height = (height - 290.0).max(100.0);
             egui::ScrollArea::vertical()
                 .max_height(list_height)
                 .show(ui, |ui| {
@@ -203,6 +206,20 @@ impl Desktop {
                 });
             ui.add_space(15.0);
             ui.label(RichText::new("SSH · порт 22").size(12.0).color(MUTED));
+            ui.add_space(5.0);
+            let update_label = if self.update.is_some() {
+                "Проверяю обновления…"
+            } else {
+                "Проверить обновления"
+            };
+            ui.add_enabled_ui(
+                self.update.is_none() && self.client.tunnel.is_none() && !stopping,
+                |ui| {
+                    if pill(ui, update_label, 183.0, false).clicked() {
+                        self.update = Some(thread::spawn(crate::updater::prepare));
+                    }
+                },
+            );
 
             if let Some(index) = selected {
                 let result = self.client.connect_profile(index);
@@ -589,6 +606,51 @@ impl Desktop {
 
 impl eframe::App for Desktop {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self
+            .update
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            let result = self
+                .update
+                .take()
+                .expect("update worker")
+                .join()
+                .map_err(|_| "Проверка обновлений остановилась.".to_owned())
+                .and_then(|result| result);
+            match result {
+                Ok(Some(installer))
+                    if self.client.tunnel.is_none()
+                        && self.client.disconnecting.is_none()
+                        && !self.client.dirty() =>
+                {
+                    match crate::updater::launch(installer) {
+                        Ok(()) => {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            return;
+                        }
+                        Err(error) => self.client.report(
+                            Err(format!("Не удалось запустить установщик: {error}")),
+                            None,
+                        ),
+                    }
+                }
+                Ok(Some(_)) => self.client.report(
+                    Err(
+                        "Отключите туннель или сохраните правки профиля и повторите обновление."
+                            .into(),
+                    ),
+                    None,
+                ),
+                Ok(None) => self
+                    .client
+                    .report(Ok(()), Some("Установлена последняя версия.")),
+                Err(error) => self.client.report(Err(error), None),
+            }
+        }
+        if self.update.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
         if ctx.input(|input| input.viewport().close_requested())
             && (self.client.tunnel.is_some() || self.client.disconnecting.is_some())
         {

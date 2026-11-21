@@ -9,6 +9,7 @@ mod elevation;
 mod profiles;
 mod tunnel;
 mod ui;
+mod updater;
 mod vpn;
 use profiles::{Authentication, Mode, Profiles, SavedProfile};
 use tunnel::Tunnel;

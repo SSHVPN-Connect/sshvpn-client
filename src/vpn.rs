@@ -408,7 +408,7 @@ impl Drop for Routes {
     }
 }
 
-fn powershell(script: &str) -> Result<String, String> {
+pub(crate) fn powershell(script: &str) -> Result<String, String> {
     let bootstrap = r"
         [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
         [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)

@@ -32,9 +32,15 @@ sudo sh install-server.sh
 
 ## 2. Установить клиент Windows x64
 
-Скачай `ssh-tunnel.exe` из [последнего релиза](https://github.com/d1llr/sshvpn/releases/latest).
-Для **System VPN (IPv4)** скачай из того же релиза `wintun.dll` и положи её
-рядом с исполняемым файлом.
+Скачай `ssh-tunnel-setup-x64.exe` из [последнего релиза](https://github.com/d1llr/sshvpn/releases/latest).
+Установщик добавит SSH Tunnel в меню «Пуск» и установит Wintun вместе с приложением.
+В Windows должен быть включён **OpenSSH Client**.
+
+В установленном приложении нажми **Проверить обновления** при отключённом
+туннеле. Клиент скачает более свежий стабильный релиз с GitHub, сверит
+SHA-256 установщика, запустит обновление и закроется. Установщик снова
+откроет приложение после обновления. Профили хранятся отдельно в
+`%LOCALAPPDATA%` и сохраняются при обновлении.
 
 ### Сборка из исходников
 
@@ -55,6 +61,11 @@ cargo +stable-x86_64-pc-windows-gnu build --release --locked
 Для **System VPN (IPv4)** скачай официальный архив [Wintun](https://www.wintun.net/)
 и скопируй из него `wintun\bin\amd64\wintun.dll` в `target\release`,
 рядом с `ssh-tunnel.exe`.
+
+Чтобы собрать установщик, установи [Inno Setup](https://jrsoftware.org/inno-setup/downloads),
+положи `ssh-tunnel.exe`, `wintun.dll` и `WINTUN-LICENSE.txt` в папку сборки
+и вызови `ISCC.exe /DAppVersion=0.2.0 /DPayloadDir=ПОЛНЫЙ_ПУТЬ installer\ssh-tunnel.iss`.
+Версия должна совпадать с `Cargo.toml`, а тег релиза — иметь вид `v0.2.0`.
 
 ## 3. Подключиться
 
