@@ -41,6 +41,8 @@ Source: "{#PayloadDir}\sing-box.exe"; DestDir: "{app}"; Flags: ignoreversion ski
 Source: "{#PayloadDir}\libcronet.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#PayloadDir}\SING-BOX-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "sing-box-source.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\fonts\Inter-OFL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\assets\fonts\IBMPlexMono-OFL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{commonprograms}\SSH Tunnel"; Filename: "{app}\ssh-tunnel.exe"; WorkingDir: "{app}"

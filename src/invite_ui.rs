@@ -10,7 +10,7 @@ enum AccessAction {
 }
 
 fn access_row(ui: &mut egui::Ui, entry: &invites::AccessEntry, confirming: bool) -> AccessAction {
-    use crate::ui::{pill, surface, BACKGROUND, ERROR, MUTED};
+    use crate::ui::{danger_pill, pill, surface, BACKGROUND, MUTED};
     let (status, color, fill, revocable) = match entry.state {
         invites::AccessState::Active => ("Активировано", 0x9fe0c1, 0x203b35, true),
         invites::AccessState::Pending => ("Ожидает активации", 0xd0bcff, 0x2e2445, true),
@@ -34,7 +34,7 @@ fn access_row(ui: &mut egui::Ui, entry: &invites::AccessEntry, confirming: bool)
         ui.set_min_width(width);
         let stacked = width < 400.0;
         let data_width = if stacked { width } else { width - 113.0 };
-        let (row, _) = ui.allocate_exact_size(egui::vec2(width, 44.0), egui::Sense::hover());
+        let (row, _) = ui.allocate_exact_size(egui::vec2(width, 49.0), egui::Sense::hover());
         let first_width = (data_width - 12.0) * 0.51;
         let column = |ui: &mut egui::Ui, x, width| {
             ui.new_child(
@@ -74,31 +74,13 @@ fn access_row(ui: &mut egui::Ui, entry: &invites::AccessEntry, confirming: bool)
             .add(egui::Label::new(last).truncate())
             .on_hover_text(last);
         if revocable {
-            let draw_action = |ui: &mut egui::Ui| {
-                ui.with_layout(
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-
-                    |ui| {
-                        ui.add_sized(
-                            egui::vec2(102.0, 36.0),
-                            egui::Button::new(egui::RichText::new("Отозвать").color(ERROR))
-                                .corner_radius(18)
-                                .stroke(egui::Stroke::new(
-                                    1.0_f32,
-                                    egui::Color32::from_rgb(73, 58, 78),
-                                )),
-                        )
-                    },
-                )
-                    .inner
-            };
             let clicked = if stacked {
                 ui.add_space(5.0);
-                draw_action(ui).clicked()
+                danger_pill(ui, "Отозвать").clicked()
             } else {
                 let mut button = column(ui, width - 102.0, 102.0);
                 button.add_space(4.0);
-                draw_action(&mut button).clicked()
+                danger_pill(&mut button, "Отозвать").clicked()
             };
             if clicked {
                 action = AccessAction::Ask;
@@ -199,6 +181,21 @@ pub struct InviteUi {
 }
 
 impl InviteUi {
+    pub fn is_import_open(&self) -> bool {
+        self.operation == Some(Operation::Import)
+    }
+
+    pub fn can_leave_import(&self) -> bool {
+        !self.is_import_open()
+            || (self.worker.is_none() && !matches!(self.result, Some(Completion::Imported(_))))
+    }
+
+    pub fn close_import(&mut self) {
+        if self.is_import_open() && self.can_leave_import() {
+            *self = Self::default();
+        }
+    }
+
     pub fn take_shared(&mut self) -> bool {
         std::mem::take(&mut self.shared)
     }
@@ -254,8 +251,9 @@ impl InviteUi {
         let mut revoke = false;
         let mut save_import = false;
         let mut close = false;
+        let embedded = inline.is_some();
         let mut body = |ui: &mut egui::Ui| {
-            if operation != Operation::Manage {
+            if !embedded {
                 ui.set_width((ctx.screen_rect().width() - 64.0).clamp(280.0, 530.0));
                 ui.heading(if operation == Operation::Share {
                     "Поделиться доступом"
@@ -348,13 +346,15 @@ impl InviteUi {
                     }
                     None => {
                         if operation == Operation::Import {
-                            ui.label("Строка приглашения");
-                            ui.add(
+                            crate::ui::form_field(
+                                ui,
+                                "Строка приглашения",
                                 egui::TextEdit::multiline(&mut self.encoded)
                                     .desired_rows(3)
                                     .hint_text("ssh-tunnel-invite-1:…")
-                                    .desired_width(f32::INFINITY),
+                                    .font(egui::FontId::monospace(14.0)),
                             );
+                            ui.add_space(8.0);
                             crate::ui::field(
                                 ui,
                                 "Код расшифровки",
@@ -378,14 +378,21 @@ impl InviteUi {
                                     "Необязательно",
                                     false,
                                 );
-                                ui.add_space(6.0);
-                                crate::ui::field(
-                                    ui,
-                                    "Пароль SSH или фраза ключа",
-                                    &mut self.ssh_secret,
-                                    "Если требуется",
-                                    true,
-                                );
+                                if self.error.is_some() {
+                                    ui.add_space(8.0);
+                                    egui::CollapsingHeader::new("Ввести данные SSH вручную").show(
+                                        ui,
+                                        |ui| {
+                                            crate::ui::field(
+                                                ui,
+                                                "Пароль SSH или фраза ключа",
+                                                &mut self.ssh_secret,
+                                                "Если требуется",
+                                                true,
+                                            );
+                                        },
+                                    );
+                                }
                             }
                         }
                         if operation != Operation::Manage {
@@ -474,10 +481,6 @@ impl InviteUi {
                     self.error = Some("Папка профилей недоступна.".into());
                     return;
                 };
-                if let Err(error) = client.ensure_saved() {
-                    self.error = Some(error);
-                    return;
-                }
                 let encoded = self.encoded.clone();
                 let code = self.code.clone();
                 self.worker = Some(thread::spawn(move || {

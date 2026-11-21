@@ -114,6 +114,38 @@ impl Desktop {
         visuals.widgets.hovered.weak_bg_fill = HOVER;
         visuals.widgets.active.bg_fill = HOVER;
         ctx.set_visuals(visuals);
+        let mut fonts = egui::FontDefinitions::default();
+        for (name, family, data) in [
+            (
+                "Inter",
+                egui::FontFamily::Proportional,
+                &include_bytes!("../assets/fonts/Inter.ttf")[..],
+            ),
+            (
+                "IBM Plex Mono",
+                egui::FontFamily::Monospace,
+                &include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf")[..],
+            ),
+        ] {
+            fonts
+                .font_data
+                .insert(name.into(), egui::FontData::from_static(data).into());
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .insert(0, name.into());
+        }
+        ctx.set_fonts(fonts);
+        ctx.style_mut(|style| {
+            for (role, size) in [
+                (egui::TextStyle::Body, 14.0),
+                (egui::TextStyle::Small, 12.0),
+                (egui::TextStyle::Heading, 22.0),
+            ] {
+                style.text_styles.insert(role, FontId::proportional(size));
+            }
+        });
         Ok(Self {
             client,
             assets: Assets::load(ctx)?,
@@ -145,7 +177,7 @@ impl Desktop {
                 11.0,
                 MUTED,
             );
-            ui.add_space(33.0);
+            ui.add_space(21.0);
             ui.label(RichText::new("Профили").size(15.0).strong());
             let stopping = self.client.disconnecting.is_some();
             let manageable =
@@ -164,11 +196,10 @@ impl Desktop {
 
             let mut selected = None;
             let mut editing = None;
-            let list_height = (height - 370.0).max(92.0);
+            let list_height = (height - 302.0).max(92.0);
             egui::ScrollArea::vertical()
                 .max_height(list_height)
                 .show(ui, |ui| {
-                    ui.set_min_height(list_height);
                     if self.client.profiles.entries.is_empty() {
                         ui.label(RichText::new("Нет сохранённых профилей").color(MUTED));
                     }
@@ -225,7 +256,9 @@ impl Desktop {
                         ui.add_space(9.0);
                     }
                 });
-            ui.add_space(15.0);
+            ui.add_space(8.0);
+            let remaining = ui.max_rect().bottom() - ui.cursor().top();
+            ui.add_space((remaining - 67.0).max(12.0));
             ui.label(
                 RichText::new(concat!("Версия ", env!("CARGO_PKG_VERSION")))
                     .size(12.0)
@@ -257,13 +290,6 @@ impl Desktop {
                 }
                 self.client.report(result, None);
             }
-            ui.add_enabled_ui(manageable, |ui| {
-                use crate::invite_ui::Operation;
-                if pill(ui, "Импортировать приглашение", 208.0, false).clicked()
-                {
-                    self.invitations.open(Operation::Import);
-                }
-            });
         });
     }
 
@@ -605,9 +631,38 @@ impl Desktop {
                 };
                 ui.label(RichText::new(title).size(27.0).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    close = icon_button(ui, &self.assets.close, "Закрыть").clicked();
+                    close = ui
+                        .add_enabled_ui(self.invitations.can_leave_import(), |ui| {
+                            icon_button(ui, &self.assets.close, "Закрыть").clicked()
+                        })
+                        .inner;
                 });
             });
+            if self.client.profiles.selected.is_none() {
+                ui.add_space(10.0);
+                let importing = self.invitations.is_import_open();
+                surface(BACKGROUND, 22, 4).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled_ui(self.invitations.can_leave_import(), |ui| {
+                                pill(ui, "Подключение к серверу", 200.0, !importing).clicked()
+                            })
+                            .inner
+                        {
+                            self.invitations.close_import();
+                        }
+                        if pill(ui, "По приглашению", 150.0, importing).clicked() && !importing
+                        {
+                            self.invitations.open(crate::invite_ui::Operation::Import);
+                        }
+                    });
+                });
+                if self.invitations.is_import_open() {
+                    ui.add_space(14.0);
+                    self.invitations.show(ctx, &mut self.client, Some(ui));
+                    return close;
+                }
+            }
             if !self.client.draft.name.is_empty() {
                 ui.label(RichText::new(&self.client.draft.name).color(MUTED));
             }
@@ -742,7 +797,8 @@ impl Desktop {
                 });
             close
         });
-        if result.inner || result.should_close() {
+        if (result.inner || result.should_close()) && self.invitations.can_leave_import() {
+            self.invitations.close_import();
             self.client.load_selection();
             self.client.editing = false;
         }
@@ -806,7 +862,9 @@ impl Desktop {
             self.editor(ctx);
         }
         self.routing_dialog(ctx);
-        self.invitations.show(ctx, &mut self.client, None);
+        if !self.invitations.is_import_open() {
+            self.invitations.show(ctx, &mut self.client, None);
+        }
         if self.invitations.take_shared() {
             self.access.refresh();
         }
@@ -1056,7 +1114,15 @@ fn control(ui: &mut Ui, size: egui::Vec2, label: &str) -> (Rect, Response, f32) 
 }
 
 pub(crate) fn pill(ui: &mut Ui, label: &str, width: f32, filled: bool) -> Response {
-    let (rect, response, hover) = control(ui, vec2(width, 40.0), label);
+    draw_pill(ui, label, vec2(width, 40.0), filled, TEXT)
+}
+
+pub(crate) fn danger_pill(ui: &mut Ui, label: &str) -> Response {
+    draw_pill(ui, label, vec2(102.0, 36.0), false, ERROR)
+}
+
+fn draw_pill(ui: &mut Ui, label: &str, size: egui::Vec2, filled: bool, color: Color32) -> Response {
+    let (rect, response, hover) = control(ui, size, label);
     let fill = if filled {
         mix(PRIMARY, Color32::from_rgb(227, 215, 255), hover)
     } else {
@@ -1065,10 +1131,10 @@ pub(crate) fn pill(ui: &mut Ui, label: &str, width: f32, filled: bool) -> Respon
     let border = if filled {
         Stroke::NONE
     } else {
-        Stroke::new(1.0_f32, mix(MUTED, LAVENDER, hover))
+        Stroke::new(1.0_f32, mix(BORDER, LAVENDER, hover))
     };
     ui.painter()
-        .rect(rect, 20.0, fill, border, StrokeKind::Inside);
+        .rect(rect, size.y / 2.0, fill, border, StrokeKind::Inside);
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -1077,7 +1143,7 @@ pub(crate) fn pill(ui: &mut Ui, label: &str, width: f32, filled: bool) -> Respon
         if filled {
             Color32::from_rgb(41, 22, 82)
         } else {
-            TEXT
+            color
         },
     );
     response
@@ -1230,18 +1296,22 @@ fn routing_fields(
 }
 
 pub(crate) fn field(ui: &mut Ui, label: &str, value: &mut String, hint: &str, secret: bool) {
+    form_field(
+        ui,
+        label,
+        egui::TextEdit::singleline(value)
+            .password(secret)
+            .hint_text(hint)
+            .font(FontId::proportional(15.0)),
+    );
+}
+
+pub(crate) fn form_field(ui: &mut Ui, label: &str, edit: egui::TextEdit<'_>) {
     rounded(Color32::from_rgb(27, 25, 45), 13, 12)
         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(99, 87, 126)))
         .show(ui, |ui| {
             ui.label(RichText::new(label).size(11.0).color(LAVENDER));
-            ui.add(
-                egui::TextEdit::singleline(value)
-                    .password(secret)
-                    .hint_text(hint)
-                    .font(FontId::proportional(15.0))
-                    .frame(false)
-                    .desired_width(f32::INFINITY),
-            );
+            ui.add(edit.frame(false).desired_width(f32::INFINITY));
         });
 }
 
