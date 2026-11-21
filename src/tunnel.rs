@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Seek};
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, TcpListener};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Profile {
     pub server: String,
@@ -31,37 +31,6 @@ impl Default for Profile {
 }
 
 impl Profile {
-    fn path() -> io::Result<PathBuf> {
-        let local = env::var_os("LOCALAPPDATA")
-            .ok_or_else(|| io::Error::other("LOCALAPPDATA is unavailable."))?;
-        Ok(PathBuf::from(local)
-            .join("SshTunnelClient")
-            .join("profile.json"))
-    }
-
-    pub fn load() -> io::Result<Self> {
-        match fs::read_to_string(Self::path()?) {
-            Ok(json) => {
-                serde_json::from_str(json.trim_start_matches('\u{feff}')).map_err(io::Error::other)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error),
-        }
-    }
-
-    pub fn save(&self) -> io::Result<()> {
-        let path = Self::path()?;
-        let directory = path
-            .parent()
-            .ok_or_else(|| io::Error::other("Invalid profile path."))?;
-        fs::create_dir_all(directory)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-        serde_json::to_writer_pretty(temporary.as_file_mut(), self)?;
-        temporary.as_file_mut().flush()?;
-        temporary.persist(path)?;
-        Ok(())
-    }
-
     pub fn validate(&self) -> Result<(), String> {
         let hostname = self.server.trim_end_matches('.');
         let valid_hostname = !hostname.is_empty()
@@ -164,7 +133,7 @@ pub fn ssh_command(
             "-o",
             "ServerAliveCountMax=3",
             "-o",
-            "StrictHostKeyChecking=yes",
+            "StrictHostKeyChecking=accept-new",
             "-o",
             "NumberOfPasswordPrompts=1",
         ]);

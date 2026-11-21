@@ -10,6 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const MTU: usize = 1420;
+const ADAPTER_GUID: u128 = 0x9648bb2f_098b_4d6c_8f35_7c011cdf8651;
 const HELLO: &[u8; 8] = b"SSHVPN1\n";
 
 pub struct Vpn {
@@ -95,7 +96,7 @@ impl Vpn {
                         return Ok(());
                     }
                     let adapter =
-                        wintun::Adapter::create(&driver, "SSH Tunnel VPN", "SSH Tunnel", None)
+                        wintun::Adapter::create(&driver, "SSH Tunnel VPN", "SSH Tunnel", Some(ADAPTER_GUID))
                             .map_err(|e| {
                                 format!(
                                     "Could not create Wintun adapter. Run as administrator. {e}"
