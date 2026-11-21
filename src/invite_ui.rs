@@ -27,9 +27,18 @@ pub struct InviteUi {
     revoke_user: Option<String>,
     load_access: bool,
     ssh_secret: String,
+    shared: bool,
 }
 
 impl InviteUi {
+    pub fn take_shared(&mut self) -> bool {
+        std::mem::take(&mut self.shared)
+    }
+
+    pub fn refresh(&mut self) {
+        self.load_access = self.operation == Some(Operation::Manage);
+    }
+
     pub fn open(&mut self, operation: Operation) {
         if self.worker.is_none() && !matches!(self.result, Some(Completion::Imported(_))) {
             *self = Self {
@@ -40,7 +49,12 @@ impl InviteUi {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, client: &mut Client) {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        client: &mut Client,
+        inline: Option<&mut egui::Ui>,
+    ) {
         let Some(operation) = self.operation else {
             return;
         };
@@ -57,105 +71,225 @@ impl InviteUi {
                 .map_err(|_| "Операция с приглашением прервана.".to_owned())
                 .and_then(|result| result)
             {
-                Ok(result) => self.result = Some(result),
+                Ok(result) => {
+                    self.shared = matches!(result, Completion::Shared(_));
+                    self.result = Some(result);
+                }
                 Err(error) => self.error = Some(error),
             }
         }
         if self.worker.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        let mut start = std::mem::take(&mut self.load_access);
+        let mut start = self.worker.is_none() && std::mem::take(&mut self.load_access);
         let mut revoke = false;
-        let mut save_import =
-            matches!(self.result, Some(Completion::Imported(_))) && self.error.is_none();
+        let mut save_import = false;
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("invitation")).show(ctx, |ui| {
-            ui.set_width(if operation == Operation::Manage { 540.0 } else { 430.0 });
-            ui.heading(match operation {
-                Operation::Share => "Поделиться профилем",
-                Operation::Import => "Импортировать приглашение",
-                Operation::Manage => "Выданные приглашения",
-            });
+        let mut body = |ui: &mut egui::Ui| {
+            if operation != Operation::Manage {
+                ui.set_width((ctx.screen_rect().width() - 64.0).clamp(280.0, 530.0));
+                ui.heading(if operation == Operation::Share {
+                    "Поделиться доступом"
+                } else {
+                    "Импортировать приглашение"
+                });
+            }
             if self.worker.is_some() {
                 ui.spinner();
                 ui.label("Выполняется запрос по SSH…");
             } else {
                 match &self.result {
                     Some(Completion::Shared(invite)) => {
-                        ui.label(format!("Пользователь: {} · до {} (UTC)", invite.user, invite.expires));
-                        ui.label("Передайте строку и код разными каналами. Приглашение сработает один раз.");
-                        if ui.button("Копировать строку приглашения").clicked() { ctx.copy_text(invite.encoded.clone()); }
-                        if ui.button("Копировать код расшифровки").clicked() { ctx.copy_text(invite.code.clone()); }
-                        if ui.button("Копировать имя для отзыва").clicked() { ctx.copy_text(invite.user.clone()); }
+                        crate::ui::badge(ui, "Одноразовое · 30 минут", false);
+                        ui.label(
+                            egui::RichText::new("Отправьте строку и код разными каналами.")
+                                .color(crate::ui::MUTED),
+                        );
+                        for (label, preview, value) in [
+                            (
+                                "Строка приглашения",
+                                "ssh-tunnel-invite-1:…",
+                                &invite.encoded,
+                            ),
+                            ("Код расшифровки", "••••••••", &invite.code),
+                        ] {
+                            crate::ui::surface(crate::ui::BACKGROUND, 12, 10).show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.strong(label);
+                                        ui.label(
+                                            egui::RichText::new(preview)
+                                                .small()
+                                                .color(crate::ui::MUTED),
+                                        );
+                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if crate::ui::pill(ui, "Копировать", 112.0, false)
+                                                .clicked()
+                                            {
+                                                ctx.copy_text(value.clone());
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} · до {} (UTC)",
+                                invite.user, invite.expires
+                            ))
+                            .small()
+                            .color(crate::ui::MUTED),
+                        );
                     }
-                    Some(Completion::Imported(_)) => {
-                        if ui.button("Сохранить импортированный профиль").clicked() { save_import = true; }
+                    Some(Completion::Imported(imported)) => {
+                        ui.strong(&imported.profile.name);
+                        ui.label("Приглашение активировано. После сохранения выберите SOCKS5 или System VPN (IPv4).");
+                        if crate::ui::pill(ui, "Сохранить профиль", 177.0, true).clicked()
+                        {
+                            save_import = true;
+                        }
                     }
                     Some(Completion::Access(entries, revoked)) => {
-                        if *revoked { ui.label("Доступ отозван."); }
-                        if entries.is_empty() { ui.label("Приглашений пока нет."); }
-                        egui::ScrollArea::vertical().max_height(275.0).show(ui, |ui| {
-                            for entry in entries {
-                                let (status, revocable) = match entry.state {
-                                    invites::AccessState::Active => ("Активировано", true),
-                                    invites::AccessState::Pending => ("Ожидает активации", true),
-                                    invites::AccessState::Expired => ("Срок истёк", false),
-                                    invites::AccessState::Revoked => ("Доступ отозван", false),
-                                };
-                                ui.group(|ui| {
+                        if *revoked {
+                            ui.label("Доступ отозван.");
+                        }
+                        if entries.is_empty() {
+                            ui.label("Приглашений пока нет.");
+                        }
+                        for entry in entries {
+                            let (status, revocable) = match entry.state {
+                                invites::AccessState::Active => ("Активировано", true),
+                                invites::AccessState::Pending => ("Ожидает активации", true),
+                                invites::AccessState::Expired => ("Срок истёк", false),
+                                invites::AccessState::Revoked => ("Доступ отозван", false),
+                            };
+                            crate::ui::surface(crate::ui::BACKGROUND, 14, 11).show(ui, |ui| {
+                                let width = ui.available_width();
+                                ui.set_min_width(width);
+                                ui.columns(3, |columns| {
+                                    let name = if entry.name.is_empty() {
+                                        &entry.user
+                                    } else {
+                                        &entry.name
+                                    };
+                                    columns[0]
+                                        .add(
+                                            egui::Label::new(egui::RichText::new(name).strong())
+                                                .truncate(),
+                                        )
+                                        .on_hover_text(&entry.user);
+                                    crate::ui::badge(
+                                        &mut columns[0],
+                                        status,
+                                        matches!(entry.state, invites::AccessState::Active),
+                                    );
+                                    columns[1].label(
+                                        egui::RichText::new("Последнее подключение")
+                                            .small()
+                                            .color(crate::ui::MUTED),
+                                    );
+                                    columns[1].label(
+                                        entry
+                                            .last_connected
+                                            .as_deref()
+                                            .unwrap_or("Нет записи в журнале"),
+                                    );
+                                    columns[2].with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if revocable
+                                                && ui
+                                                    .button(
+                                                        egui::RichText::new("Отозвать")
+                                                            .color(crate::ui::ERROR),
+                                                    )
+                                                    .clicked()
+                                            {
+                                                self.revoke_user = Some(entry.user.clone());
+                                            }
+                                        },
+                                    );
+                                });
+                                if self.revoke_user.as_deref() == Some(&entry.user) {
                                     ui.horizontal_wrapped(|ui| {
-                                        let name = if entry.name.is_empty() { &entry.user } else { &entry.name };
-                                        ui.strong(name).on_hover_text(&entry.user);
-                                        ui.label(status);
-                                        if revocable && ui.small_button("Отозвать").clicked() {
-                                            self.revoke_user = Some(entry.user.clone());
+                                        ui.label("Закрыть доступ этому пользователю?");
+                                        revoke = ui.button("Подтвердить отзыв").clicked();
+                                        if ui.button("Отмена").clicked() {
+                                            self.revoke_user = None;
                                         }
                                     });
-                                    let last = entry.last_connected.as_deref().unwrap_or("нет записи в журнале SSH");
-                                    ui.label(format!("Последнее подключение: {last}"));
-                                    if self.revoke_user.as_deref() == Some(&entry.user) {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label("Закрыть доступ этому пользователю?");
-                                            revoke = ui.button("Подтвердить отзыв").clicked();
-                                            if ui.button("Отмена").clicked() { self.revoke_user = None; }
-                                        });
-                                    }
-                                });
-                            }
-                        });
+                                }
+                            });
+                        }
                     }
                     None => {
                         if operation == Operation::Import {
                             ui.label("Вставьте строку приглашения и отдельный код.");
-                            ui.add(egui::TextEdit::multiline(&mut self.encoded).desired_rows(3).desired_width(f32::INFINITY));
-                            ui.add(egui::TextEdit::singleline(&mut self.code).password(true).hint_text("Код расшифровки"));
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.encoded)
+                                    .desired_rows(3)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.code)
+                                    .password(true)
+                                    .hint_text("Код расшифровки"),
+                            );
                         } else {
                             if operation == Operation::Share {
-                                ui.add(egui::TextEdit::singleline(&mut self.recipient).char_limit(80)
-                                    .hint_text("Имя получателя (необязательно)"));
-                                ui.add(egui::TextEdit::singleline(&mut self.ssh_secret).password(true)
-                                    .hint_text("Пароль SSH или фраза ключа, если требуется"));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.recipient)
+                                        .char_limit(80)
+                                        .hint_text("Имя получателя (необязательно)"),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.ssh_secret)
+                                        .password(true)
+                                        .hint_text("Пароль SSH или фраза ключа, если требуется"),
+                                );
                             }
                         }
                         if operation != Operation::Manage {
-                            start = ui.button(if operation == Operation::Share {
-                                "Создать приглашение"
-                            } else {
-                                "Активировать"
-                            }).clicked();
+                            start = ui
+                                .button(if operation == Operation::Share {
+                                    "Создать приглашение"
+                                } else {
+                                    "Активировать"
+                                })
+                                .clicked();
                         }
                     }
                 }
                 if operation == Operation::Manage {
-                    ui.add(egui::TextEdit::singleline(&mut self.ssh_secret).password(true)
-                        .hint_text("Пароль SSH или фраза ключа, если требуется"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.ssh_secret)
+                            .password(true)
+                            .hint_text("Пароль SSH или фраза ключа, если требуется"),
+                    );
                     start |= ui.button("Обновить список").clicked();
                 }
-                if let Some(error) = &self.error { ui.colored_label(egui::Color32::LIGHT_RED, error); }
-                close = !matches!(self.result, Some(Completion::Imported(_))) && ui.button("Закрыть").clicked();
+                if let Some(error) = &self.error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+                close = operation != Operation::Manage
+                    && !matches!(self.result, Some(Completion::Imported(_)))
+                    && ui.button("Закрыть").clicked();
             }
-        });
-        if (close || modal.should_close())
+        };
+        let dismiss = if let Some(ui) = inline {
+            body(ui);
+            false
+        } else {
+            egui::Modal::new(egui::Id::new("invitation"))
+                .show(ctx, body)
+                .should_close()
+        };
+        if (close || dismiss)
             && self.worker.is_none()
             && !matches!(self.result, Some(Completion::Imported(_)))
         {
@@ -204,7 +338,14 @@ impl InviteUi {
                         .map(|result| Completion::Imported(Box::new(result)))
                 }));
             } else {
-                let profile = client.draft.clone();
+                let Some(profile) = client
+                    .profiles
+                    .selected
+                    .map(|index| client.profiles.entries[index].clone())
+                else {
+                    self.error = Some("Выберите сохранённый профиль владельца.".into());
+                    return;
+                };
                 let secret = if self.ssh_secret.is_empty() {
                     match Client::connection_secret(&profile) {
                         Ok(secret) => secret,
@@ -216,7 +357,11 @@ impl InviteUi {
                 } else {
                     std::mem::take(&mut self.ssh_secret)
                 };
-                let user = if revoke { self.revoke_user.take() } else { None };
+                let user = if revoke {
+                    self.revoke_user.take()
+                } else {
+                    None
+                };
                 let recipient = self.recipient.trim().to_owned();
                 self.worker = Some(thread::spawn(move || {
                     if operation == Operation::Share {
@@ -226,7 +371,8 @@ impl InviteUi {
                         if let Some(user) = user {
                             invites::revoke(profile.clone(), secret.clone(), user)?;
                         }
-                        invites::list(&profile, secret).map(|entries| Completion::Access(entries, revoked))
+                        invites::list(&profile, secret)
+                            .map(|entries| Completion::Access(entries, revoked))
                     }
                 }));
             }

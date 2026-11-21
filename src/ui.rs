@@ -6,19 +6,19 @@ use eframe::egui::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const BACKGROUND: Color32 = Color32::from_rgb(13, 13, 23);
-const RAIL: Color32 = Color32::from_rgb(22, 22, 36);
-const CARD: Color32 = Color32::from_rgb(24, 24, 41);
-const ROW: Color32 = Color32::from_rgb(32, 32, 56);
-const BORDER: Color32 = Color32::from_rgb(48, 48, 73);
-const TEXT: Color32 = Color32::from_rgb(243, 240, 255);
-const MUTED: Color32 = Color32::from_rgb(165, 161, 189);
-const LAVENDER: Color32 = Color32::from_rgb(204, 185, 255);
+pub(crate) const BACKGROUND: Color32 = Color32::from_rgb(16, 16, 25);
+const RAIL: Color32 = Color32::from_rgb(24, 24, 37);
+const CARD: Color32 = RAIL;
+const ROW: Color32 = Color32::from_rgb(34, 33, 53);
+const BORDER: Color32 = Color32::from_rgb(55, 52, 77);
+const TEXT: Color32 = Color32::from_rgb(243, 239, 252);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(186, 179, 206);
+const LAVENDER: Color32 = Color32::from_rgb(208, 188, 255);
 const MINT: Color32 = Color32::from_rgb(157, 231, 207);
-const PRIMARY: Color32 = Color32::from_rgb(103, 80, 164);
+const PRIMARY: Color32 = LAVENDER;
 const HOVER: Color32 = Color32::from_rgb(52, 40, 73);
-const SOFT: Color32 = Color32::from_rgb(39, 32, 59);
-const ERROR: Color32 = Color32::from_rgb(255, 180, 171);
+const SOFT: Color32 = Color32::from_rgb(46, 36, 69);
+pub(crate) const ERROR: Color32 = Color32::from_rgb(255, 180, 189);
 const HOVER_DURATION: f32 = 0.16;
 
 struct Artwork {
@@ -65,10 +65,6 @@ struct Assets {
     edit: Artwork,
     server: Artwork,
     close: Artwork,
-    idle_dot: Artwork,
-    active_dot: Artwork,
-    idle_tunnel: Artwork,
-    active_tunnel: Artwork,
 }
 
 impl Assets {
@@ -87,10 +83,6 @@ impl Assets {
             edit: asset!("edit"),
             server: asset!("server"),
             close: asset!("close"),
-            idle_dot: asset!("idle-dot"),
-            active_dot: asset!("active-dot"),
-            idle_tunnel: asset!("idle-tunnel"),
-            active_tunnel: asset!("active-tunnel"),
         })
     }
 }
@@ -100,6 +92,9 @@ pub struct Desktop {
     assets: Assets,
     running_apps: crate::running_apps::Picker,
     invitations: crate::invite_ui::InviteUi,
+    access: crate::invite_ui::InviteUi,
+    access_owner: Option<crate::tunnel::Profile>,
+    routing: Option<crate::profiles::Ipv4Routing>,
     closing: bool,
     tray: Option<crate::tray::Tray>,
     tray_initialized: bool,
@@ -118,6 +113,9 @@ impl Desktop {
             assets: Assets::load(ctx)?,
             running_apps: crate::running_apps::Picker::default(),
             invitations: crate::invite_ui::InviteUi::default(),
+            access: crate::invite_ui::InviteUi::default(),
+            access_owner: None,
+            routing: None,
             closing: false,
             tray: None,
             tray_initialized: false,
@@ -127,8 +125,8 @@ impl Desktop {
 
     fn sidebar(&mut self, ui: &mut Ui, height: f32) {
         rounded(RAIL, 20, 18).show(ui, |ui| {
-            ui.set_width(236.0);
-            let (brand, _) = ui.allocate_exact_size(vec2(236.0, 42.0), Sense::hover());
+            ui.set_width(208.0);
+            let (brand, _) = ui.allocate_exact_size(vec2(208.0, 42.0), Sense::hover());
             ui.painter()
                 .rect_filled(Rect::from_min_size(brand.min, vec2(40.0, 40.0)), 12.0, SOFT);
             self.assets.mark.draw(ui, brand.min + vec2(9.0, 9.0));
@@ -171,7 +169,7 @@ impl Desktop {
                         ui.add_enabled_ui(manageable, |ui| {
                             ui.horizontal(|ui| {
                                 let (rect, response, hover) =
-                                    control(ui, vec2(192.0, 61.0), &profile.name);
+                                    control(ui, vec2(160.0, 61.0), &profile.name);
                                 let current = self.client.profiles.selected == Some(index);
                                 ui.painter().rect(
                                     rect,
@@ -249,123 +247,113 @@ impl Desktop {
                 if ui.button("Импортировать приглашение").clicked() {
                     self.invitations.open(Operation::Import);
                 }
-                if self.client.profiles.selected.is_some()
-                    && self.client.draft.connection.user == "root"
-                {
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Поделиться").clicked() {
-                            self.invitations.open(Operation::Share);
-                        }
-                        if ui.button("Выданные приглашения").clicked() {
-                            self.invitations.open(Operation::Manage);
-                        }
-                    });
-                }
             });
         });
     }
 
     fn dashboard(&mut self, ui: &mut Ui) {
-        ui.add_space(10.0);
-        ui.label(RichText::new("Подключение").size(14.0).color(MUTED));
-        let name = self.client.draft.name.trim();
-        ui.add(
-            egui::Label::new(
-                RichText::new(if name.is_empty() { "SSH Tunnel" } else { name })
-                    .size(31.0)
-                    .strong(),
-            )
-            .truncate(),
-        );
-        ui.add_space(13.0);
-
+        use crate::invite_ui::Operation;
         let active = self.client.tunnel.is_some();
         let stopping = self.client.disconnecting.is_some();
+        let manageable = !active && !stopping;
+        let selected = self.client.profiles.selected;
+        let owner = selected.and_then(|index| {
+            let profile = &self.client.profiles.entries[index].connection;
+            (profile.user == "root").then(|| profile.clone())
+        });
+        if self.access_owner != owner {
+            self.access_owner = owner;
+            self.access = crate::invite_ui::InviteUi::default();
+            if self.access_owner.is_some() {
+                self.access.open(Operation::Manage);
+            }
+        }
+        ui.horizontal(|ui| {
+            let width = ui.available_width();
+            let share_width = if self.access_owner.is_some() {
+                134.0
+            } else {
+                0.0
+            };
+            ui.allocate_ui_with_layout(
+                vec2((width - share_width).max(90.0), 58.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.label(RichText::new("Подключение").small().color(MUTED));
+                    let name = self.client.draft.name.trim();
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(if name.is_empty() { "SSH Tunnel" } else { name })
+                                .size(30.0)
+                                .strong(),
+                        )
+                        .truncate(),
+                    );
+                },
+            );
+            if self.access_owner.is_some()
+                && ui
+                    .add_enabled_ui(manageable, |ui| pill(ui, "Поделиться", 124.0, false))
+                    .inner
+                    .clicked()
+            {
+                self.invitations.open(Operation::Share);
+            }
+        });
+        ui.add_space(16.0);
         let ready = self
             .client
             .tunnel
             .as_ref()
             .is_some_and(Connection::is_ready);
-        let (status, action, status_text) = if stopping {
-            ("Отключение…", "Подождите…", "Завершение работы")
+        let (status, action) = if stopping {
+            ("Отключение…", "Подождите…")
         } else if ready {
-            ("Подключено", "Отключить", "Туннель активен")
+            ("Подключено", "Отключить")
         } else if matches!(self.client.tunnel.as_ref(), Some(Connection::Vpn(vpn)) if vpn.is_installing())
         {
-            ("Настройка сервера", "Отмена", "Установка пакетов")
+            ("Настройка сервера", "Отмена")
         } else if active {
-            ("Подключение…", "Отмена", "Запуск туннеля")
+            ("Подключение…", "Отмена")
         } else {
-            ("Не подключено", "Подключить", "Ожидает запуска")
-        };
-        let server = self.client.draft.connection.server.trim();
-        let host = if server.is_empty() {
-            "Сервер не выбран"
-        } else {
-            server
+            ("Не подключено", "Подключить")
         };
         let mut mode = self.client.draft.mode;
+        let routing = &self.client.draft.ipv4_routing;
+        let route = if routing.by_application {
+            "Выбранные приложения"
+        } else if routing.split {
+            "Список CIDR"
+        } else {
+            "Весь IPv4-трафик"
+        };
+        let proxy = match self.client.tunnel.as_ref() {
+            Some(Connection::Socks(tunnel)) if ready => tunnel.endpoint().to_string(),
+            _ => format!("127.0.0.1:{}", self.client.draft.connection.socks_port),
+        };
         let mut connect = false;
-        surface(CARD, 24, 29).show(ui, |ui| {
+        surface(Color32::from_rgb(35, 28, 53), 22, 24).show(ui, |ui| {
             let width = ui.available_width();
-            let (header, _) = ui.allocate_exact_size(vec2(width, 205.0), Sense::hover());
-            let show_art = width >= 510.0;
-            let limit = if show_art { width - 232.0 } else { width };
-            if show_art {
-                let artwork = if ready {
-                    &self.assets.active_tunnel
-                } else {
-                    &self.assets.idle_tunnel
-                };
-                artwork.draw(
-                    ui,
-                    pos2(header.right() - artwork.size.x + 8.0, header.top() - 16.0),
-                );
+            ui.set_min_width(width);
+            if mode == Mode::SystemVpn {
+                badge(ui, route, false);
+            } else if badge(ui, &format!("Локальный прокси · {proxy}"), false)
+                .on_hover_text("Копировать адрес прокси")
+                .clicked()
+            {
+                ui.ctx().copy_text(proxy.clone());
             }
-            let headline = Rect::from_min_size(header.min + vec2(0.0, 9.0), vec2(limit, 50.0));
-            slot_text(
-                ui,
-                headline,
-                RichText::new(status)
-                    .size(if width >= 510.0 { 38.0 } else { 31.0 })
-                    .strong(),
-            );
-            let host_rect = Rect::from_min_size(header.min + vec2(0.0, 63.0), vec2(limit, 27.0));
-            slot_text(ui, host_rect, RichText::new(host).size(15.0).color(MUTED));
-            let badge_width = if stopping || status_text == "Установка пакетов" {
-                143.0
-            } else {
-                128.0
+            ui.add_space(8.0);
+            ui.label(RichText::new(status).size(32.0).strong());
+            ui.add_space(14.0);
+            let connection_button = |ui: &mut Ui| {
+                ui.add_enabled_ui(!stopping, |ui| pill(ui, action, 117.0, !active))
+                    .inner
+                    .clicked()
             };
-            let badge = Rect::from_min_size(header.min + vec2(0.0, 107.0), vec2(badge_width, 30.0));
-            ui.painter().rect_filled(
-                badge,
-                15.0,
-                if ready {
-                    Color32::from_rgb(32, 61, 57)
-                } else {
-                    SOFT
-                },
-            );
-            let dot = if ready {
-                &self.assets.active_dot
-            } else {
-                &self.assets.idle_dot
-            };
-            dot.draw(ui, badge.min + vec2(12.0, 11.0));
-            text(
-                ui,
-                badge.min + vec2(26.0, 8.0),
-                status_text,
-                11.0,
-                if ready { MINT } else { LAVENDER },
-            );
-            let (divider, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
-            ui.painter().rect_filled(divider, 0.0, BORDER);
-            ui.add_space(35.0);
-            if width >= 436.0 {
+            if width >= 426.0 {
                 let (row, _) = ui.allocate_exact_size(vec2(width, 48.0), Sense::hover());
-                let mut connect_ui = ui.new_child(
+                let mut button_ui = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(Rect::from_min_size(
                             row.min + vec2(0.0, 4.0),
@@ -373,30 +361,24 @@ impl Desktop {
                         ))
                         .layout(Layout::top_down(Align::Min)),
                 );
-                connect = connect_ui
-                    .add_enabled_ui(!stopping, |ui| pill(ui, action, 117.0, !active))
-                    .inner
-                    .clicked();
+                connect = connection_button(&mut button_ui);
                 let mut mode_ui = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(Rect::from_min_size(
-                            row.min + vec2(160.0, 0.0),
+                            row.right_top() - vec2(271.0, 0.0),
                             vec2(271.0, 48.0),
                         ))
                         .layout(Layout::top_down(Align::Min)),
                 );
-                mode_ui.add_enabled_ui(!active && !stopping, |ui| segments(ui, &mut mode));
+                mode_ui.add_enabled_ui(manageable, |ui| segments(ui, &mut mode));
             } else {
-                connect = ui
-                    .add_enabled_ui(!stopping, |ui| pill(ui, action, 117.0, !active))
-                    .inner
-                    .clicked();
-                ui.add_space(7.0);
-                ui.add_enabled_ui(!active && !stopping, |ui| segments(ui, &mut mode));
+                connect = connection_button(ui);
+                ui.add_space(8.0);
+                ui.add_enabled_ui(manageable, |ui| segments(ui, &mut mode));
             }
         });
         if connect {
-            if self.client.profiles.selected.is_none() && !active {
+            if selected.is_none() && !active {
                 self.client.editing = true;
             } else {
                 let result = self.client.toggle_connection();
@@ -407,50 +389,122 @@ impl Desktop {
             let result = self.client.set_mode(mode);
             self.client.report(result, None);
         }
-
-        ui.add_space(16.0);
-        surface(RAIL, 20, 22).show(ui, |ui| {
-            let server = self.client.draft.connection.server.trim();
-            let mode = self.client.draft.mode;
-            let endpoint = match self.client.tunnel.as_ref() {
-                Some(Connection::Socks(tunnel)) if tunnel.is_ready() => {
-                    Some(tunnel.endpoint().to_string())
-                }
-                _ => None,
-            };
-            let width = ui.available_width();
-            ui.set_min_height(78.0);
-            ui.columns(3, |columns| {
-                let mode = match mode {
-                    Mode::SystemVpn if self.client.draft.ipv4_routing.by_application => {
-                        "По приложениям"
+        if self.client.draft.mode == Mode::SystemVpn {
+            ui.add_space(16.0);
+            surface(CARD, 22, 20).show(ui, |ui| {
+                let width = ui.available_width();
+                ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        vec2((width - 123.0).max(100.0), 46.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.strong("Маршрутизация");
+                            let routing = &self.client.draft.ipv4_routing;
+                            let summary = if routing.by_application {
+                                if routing.applications.is_empty() {
+                                    "Приложения не выбраны".to_owned()
+                                } else {
+                                    routing
+                                        .applications
+                                        .iter()
+                                        .map(|path| {
+                                            path.file_name()
+                                                .unwrap_or(path.as_os_str())
+                                                .to_string_lossy()
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                }
+                            } else if routing.split {
+                                if routing.cidrs.trim().is_empty() {
+                                    "Диапазоны не заданы".to_owned()
+                                } else {
+                                    routing
+                                        .cidrs
+                                        .split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                }
+                            } else {
+                                "Весь IPv4-трафик".to_owned()
+                            };
+                            ui.add(
+                                egui::Label::new(RichText::new(&summary).color(MUTED)).truncate(),
+                            )
+                            .on_hover_text(&summary);
+                        },
+                    );
+                    if ui
+                        .add_enabled_ui(manageable && selected.is_some(), |ui| {
+                            pill(ui, "Настроить", 113.0, false)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        self.routing = Some(self.client.draft.ipv4_routing.clone());
                     }
-                    Mode::SystemVpn if self.client.draft.ipv4_routing.split => "IPv4 · по CIDR",
-                    Mode::SystemVpn => "Системный IPv4",
-                    Mode::Socks5 => endpoint.as_deref().unwrap_or("SOCKS5"),
-                };
-                detail(
-                    &mut columns[0],
-                    "Сервер",
-                    if server.is_empty() { "—" } else { server },
-                );
-                detail(
-                    &mut columns[1],
-                    "Порт SSH",
-                    if server.is_empty() { "—" } else { "22" },
-                );
-                detail(&mut columns[2], "Режим", mode);
+                });
             });
-            ui.set_min_width(width);
-            if let Some(address) = endpoint {
-                if ui.button("Копировать адрес прокси").clicked() {
-                    ui.ctx().copy_text(address);
-                }
-            }
-        });
+        }
+        if self.access_owner.is_some() {
+            ui.add_space(16.0);
+            surface(CARD, 22, 20).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.strong("Выданные приглашения");
+                ui.add_space(8.0);
+                ui.add_enabled_ui(manageable, |ui| {
+                    let ctx = ui.ctx().clone();
+                    self.access.show(&ctx, &mut self.client, Some(ui));
+                });
+            });
+        }
         if let Some((message, error)) = &self.client.notice {
             ui.add_space(9.0);
             ui.label(RichText::new(message).color(if *error { ERROR } else { MINT }));
+        }
+    }
+
+    fn routing_dialog(&mut self, ctx: &egui::Context) {
+        let Some(routing) = &mut self.routing else {
+            return;
+        };
+        let mut save = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new(egui::Id::new("routing")).show(ctx, |ui| {
+            ui.set_width((ctx.screen_rect().width() - 64.0).clamp(280.0, 530.0));
+            ui.heading("Маршрутизация IPv4");
+            ui.add_space(10.0);
+            routing_fields(ui, routing, &mut self.running_apps, &mut self.client.notice);
+            if let Some((message, true)) = &self.client.notice {
+                ui.colored_label(ERROR, message);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                save = pill(ui, "Сохранить", 112.0, true).clicked();
+                cancel = pill(ui, "Отмена", 90.0, false).clicked();
+            });
+        });
+        if cancel || modal.should_close() {
+            self.routing = None;
+        } else if save {
+            let validation = if routing.by_application {
+                routing.application_paths().map(|_| ())
+            } else {
+                routing.routes().map(|_| ())
+            };
+            let result = validation.and_then(|()| {
+                let index = self.client.profiles.selected.ok_or("Выберите профиль.")?;
+                let mut updated = self.client.profiles.clone();
+                updated.entries[index].ipv4_routing = routing.clone();
+                self.client.store(updated)?;
+                self.client.draft.ipv4_routing = routing.clone();
+                Ok(())
+            });
+            if result.is_ok() {
+                self.routing = None;
+            }
+            self.client
+                .report(result, Some("Настройки маршрутизации сохранены."));
         }
     }
 
@@ -560,55 +614,13 @@ impl Desktop {
                         );
                     }
                     if profile.mode == Mode::SystemVpn {
-                        ui.add_space(8.0);
                         ui.label(RichText::new("Маршрутизация IPv4").color(MUTED));
-                        let routing = &mut profile.ipv4_routing;
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.selectable_label(!routing.split && !routing.by_application, "Весь трафик").clicked() {
-                                routing.split = false;
-                                routing.by_application = false;
-                            }
-                            if ui.selectable_label(routing.split && !routing.by_application, "Список CIDR").clicked() {
-                                routing.split = true;
-                                routing.by_application = false;
-                            }
-                            if ui.selectable_label(routing.by_application, "По приложениям").clicked() {
-                                routing.split = false;
-                                routing.by_application = true;
-                            }
-                        });
-                        if routing.by_application {
-                            let mut remove = None;
-                            for (index, path) in routing.applications.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("Удалить").clicked() { remove = Some(index); }
-                                    ui.add(egui::Label::new(path.file_name().unwrap_or(path.as_os_str()).to_string_lossy())
-                                        .truncate()).on_hover_text(path.display().to_string());
-                                });
-                            }
-                            if let Some(index) = remove { routing.applications.remove(index); }
-                            self.running_apps.show(ui, &mut routing.applications);
-                            if ui.button("Выбрать файл (.exe)").clicked() {
-                                match select_application() {
-                                    Ok(Some(path)) => crate::running_apps::add_unique(&mut routing.applications, path),
-                                    Ok(None) => {}
-                                    Err(error) => self.client.notice = Some((error, true)),
-                                }
-                            }
-                            ui.label(RichText::new("Новые TCP-соединения выбранных приложений идут через SSH. UDP выбранных приложений блокируется.").size(12.0).color(MUTED));
-                        } else if routing.split {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut profile.ipv4_routing.cidrs)
-                                    .hint_text("192.0.2.0/24\n198.51.100.10/32")
-                                    .desired_rows(3)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            ui.label(
-                                RichText::new("Через VPN идут только указанные диапазоны IPv4.")
-                                    .size(12.0)
-                                    .color(MUTED),
-                            );
-                        }
+                        routing_fields(
+                            ui,
+                            &mut profile.ipv4_routing,
+                            &mut self.running_apps,
+                            &mut self.client.notice,
+                        );
                     } else {
                         field(
                             ui,
@@ -699,7 +711,7 @@ impl Desktop {
                 let height = ui.available_height();
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(
-                        vec2(272.0, height),
+                        vec2(244.0, height),
                         Layout::top_down(Align::Min),
                         |ui| self.sidebar(ui, height),
                     );
@@ -716,7 +728,11 @@ impl Desktop {
         if self.client.editing {
             self.editor(ctx);
         }
-        self.invitations.show(ctx, &mut self.client);
+        self.routing_dialog(ctx);
+        self.invitations.show(ctx, &mut self.client, None);
+        if self.invitations.take_shared() {
+            self.access.refresh();
+        }
     }
 }
 
@@ -832,7 +848,7 @@ fn rounded(fill: Color32, radius: u8, padding: i8) -> Frame {
         .inner_margin(egui::Margin::same(padding))
 }
 
-fn surface(fill: Color32, radius: u8, padding: i8) -> Frame {
+pub(crate) fn surface(fill: Color32, radius: u8, padding: i8) -> Frame {
     rounded(fill, radius, padding).stroke(Stroke::new(1.0_f32, BORDER))
 }
 
@@ -859,11 +875,21 @@ fn slot_text(ui: &Ui, bounds: Rect, value: RichText) {
         .galley(bounds.min, galley, TEXT);
 }
 
-fn detail(ui: &mut Ui, label: &str, value: &str) {
-    ui.label(RichText::new(label).size(12.0).color(MUTED));
-    ui.add_space(3.0);
-    ui.add(egui::Label::new(RichText::new(value).size(15.0).strong()).truncate())
-        .on_hover_text(value);
+pub(crate) fn badge(ui: &mut Ui, label: &str, active: bool) -> Response {
+    ui.add(
+        egui::Button::new(
+            RichText::new(label)
+                .small()
+                .color(if active { MINT } else { LAVENDER }),
+        )
+        .corner_radius(18)
+        .stroke(Stroke::NONE)
+        .fill(if active {
+            Color32::from_rgb(32, 59, 53)
+        } else {
+            SOFT
+        }),
+    )
 }
 
 fn mix(from: Color32, to: Color32, factor: f32) -> Color32 {
@@ -884,10 +910,10 @@ fn control(ui: &mut Ui, size: egui::Vec2, label: &str) -> (Rect, Response, f32) 
     (rect, response, hover)
 }
 
-fn pill(ui: &mut Ui, label: &str, width: f32, filled: bool) -> Response {
+pub(crate) fn pill(ui: &mut Ui, label: &str, width: f32, filled: bool) -> Response {
     let (rect, response, hover) = control(ui, vec2(width, 40.0), label);
     let fill = if filled {
-        mix(PRIMARY, Color32::from_rgb(134, 108, 197), hover)
+        mix(PRIMARY, Color32::from_rgb(227, 215, 255), hover)
     } else {
         mix(Color32::TRANSPARENT, HOVER, hover)
     };
@@ -903,7 +929,11 @@ fn pill(ui: &mut Ui, label: &str, width: f32, filled: bool) -> Response {
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(14.0),
-        TEXT,
+        if filled {
+            Color32::from_rgb(41, 22, 82)
+        } else {
+            TEXT
+        },
     );
     response
 }
@@ -948,6 +978,80 @@ fn segments(ui: &mut Ui, mode: &mut Mode) {
     });
 }
 
+fn routing_fields(
+    ui: &mut Ui,
+    routing: &mut crate::profiles::Ipv4Routing,
+    picker: &mut crate::running_apps::Picker,
+    notice: &mut Option<(String, bool)>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .selectable_label(!routing.split && !routing.by_application, "Весь трафик")
+            .clicked()
+        {
+            routing.split = false;
+            routing.by_application = false;
+        }
+        if ui
+            .selectable_label(routing.split && !routing.by_application, "Список CIDR")
+            .clicked()
+        {
+            routing.split = true;
+            routing.by_application = false;
+        }
+        if ui
+            .selectable_label(routing.by_application, "По приложениям")
+            .clicked()
+        {
+            routing.split = false;
+            routing.by_application = true;
+        }
+    });
+    if routing.by_application {
+        let mut remove = None;
+        for (index, path) in routing.applications.iter().enumerate() {
+            ui.horizontal(|ui| {
+                if ui.small_button("Удалить").clicked() {
+                    remove = Some(index);
+                }
+                ui.add(
+                    egui::Label::new(
+                        path.file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy(),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(path.display().to_string());
+            });
+        }
+        if let Some(index) = remove {
+            routing.applications.remove(index);
+        }
+        picker.show(ui, &mut routing.applications);
+        if ui.button("Выбрать файл (.exe)").clicked() {
+            match select_application() {
+                Ok(Some(path)) => crate::running_apps::add_unique(&mut routing.applications, path),
+                Ok(None) => {}
+                Err(error) => *notice = Some((error, true)),
+            }
+        }
+        ui.label(RichText::new("Новые TCP-соединения выбранных приложений идут через SSH. UDP выбранных приложений блокируется.").size(12.0).color(MUTED));
+    } else if routing.split {
+        ui.add(
+            egui::TextEdit::multiline(&mut routing.cidrs)
+                .hint_text("192.0.2.0/24\n198.51.100.10/32")
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
+        ui.label(
+            RichText::new("Через VPN идут только указанные диапазоны IPv4.")
+                .size(12.0)
+                .color(MUTED),
+        );
+    }
+}
+
 fn field(ui: &mut Ui, label: &str, value: &mut String, hint: &str, secret: bool) {
     rounded(Color32::from_rgb(27, 25, 45), 13, 12)
         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(99, 87, 126)))
@@ -975,12 +1079,6 @@ mod tests {
         assert_eq!(assets.mark.size, vec2(22.0, 22.0));
         for icon in [&assets.edit, &assets.server, &assets.close] {
             assert_eq!(icon.size, vec2(20.0, 20.0));
-        }
-        for dot in [&assets.idle_dot, &assets.active_dot] {
-            assert_eq!(dot.size, vec2(7.0, 7.0));
-        }
-        for illustration in [&assets.idle_tunnel, &assets.active_tunnel] {
-            assert_eq!(illustration.size, vec2(236.0, 236.0));
         }
     }
 
@@ -1023,7 +1121,8 @@ mod tests {
                     .iter()
                     .find_map(|shape| match &shape.shape {
                         egui::Shape::Rect(shape)
-                            if shape.fill == fill && (shape.rect.width() - width).abs() <= 4.0 =>
+                            if shape.fill == fill
+                                && (width == 0.0 || (shape.rect.width() - width).abs() <= 4.0) =>
                         {
                             Some(shape.rect)
                         }
@@ -1031,13 +1130,10 @@ mod tests {
                     })
                     .expect("expected painted dashboard control")
             };
-            let badge = find(SOFT, 128.0);
+            let badge = find(SOFT, 0.0);
             let connect = find(PRIMARY, 117.0);
             let modes = find(BACKGROUND, 271.0);
-            assert!(
-                connect.top() >= badge.bottom() + 60.0,
-                "{badge:?} vs {connect:?}"
-            );
+            assert!(connect.top() > badge.bottom(), "{badge:?} vs {connect:?}");
             assert!(!connect.intersects(modes), "{connect:?} vs {modes:?}");
             if stacked {
                 assert!(connect.bottom() < modes.top());
@@ -1071,8 +1167,6 @@ mod tests {
             &desktop.assets.mark,
             &desktop.assets.edit,
             &desktop.assets.server,
-            &desktop.assets.idle_dot,
-            &desktop.assets.idle_tunnel,
         ] {
             assert!(
                 meshes.iter().any(|item| matches!(&item.primitive,
