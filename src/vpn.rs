@@ -13,8 +13,18 @@ use std::time::Duration;
 const MTU: usize = 1420;
 const ADAPTER_GUID: u128 = 0x9648bb2f_098b_4d6c_8f35_7c011cdf8651;
 const INSTALLER: &str = include_str!("../install-server.sh");
+const INVITATION_INSTALLER: &str = include_str!("../install-invitations.sh");
 const HELLO: &[u8; 8] = b"SSHVPN1\n";
 const INSTALL_REQUEST: &[u8; 8] = b"SSHVPN0\n";
+
+const VPN_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-vpn ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]"#;
+const INVITATIONS_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-invite ] || [ ! -f /var/lib/ssh-tunnel-invites/installed-v1 ] || [ ! -r /etc/ssh/ssh-tunnel-invites.conf ] || [ ! -r /etc/sudoers.d/ssh-tunnel-invites ] || ! grep -Fxq 'Include /etc/ssh/ssh-tunnel-invites.conf' /etc/ssh/sshd_config"#;
+
+fn server_installer() -> String {
+    format!(
+        "set -eu\nif {VPN_REQUIRED}; then\n(\n{INSTALLER}\n)\nfi\nif {INVITATIONS_REQUIRED}; then\n(\n{INVITATION_INSTALLER}\n)\nfi\n"
+    ).replace("\r\n", "\n")
+}
 
 fn server_command(installer_size: usize) -> String {
     format!(
@@ -24,7 +34,7 @@ if [ "$(id -u)" -ne 0 ]; then
     echo 'System VPN requires an SSH login as root.' >&2
     exit 1
 fi
-if [ ! -x "$handler" ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
+if {VPN_REQUIRED} || {INVITATIONS_REQUIRED}; then
     (
         umask 077
         printf 'SSHVPN0\n'
@@ -36,9 +46,7 @@ if [ ! -x "$handler" ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
             exit 1
         fi
         flock -w 120 9
-        if [ ! -x "$handler" ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
-            sh "$script" </dev/null >&2
-        fi
+        sh "$script" </dev/null >&2
     ) 9>/run/ssh-tunnel-vpn-install.lock
 fi
 exec "$handler""#
@@ -111,11 +119,12 @@ impl Vpn {
                         unsafe { wintun::load_from_path(dll) }.map_err(|e| e.to_string())?;
                     let (mut command, mut diagnostics) =
                         ssh_command(&profile, password_auth, password)?;
+                    let _known_host = crate::tunnel::pin_host(&mut command, &profile)?;
                     let mut process = child_for_worker.lock().map_err(|e| e.to_string())?;
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    let installer = INSTALLER.replace("\r\n", "\n");
+                    let installer = server_installer();
                     let server_command = server_command(installer.len());
                     command.stdin(Stdio::piped()).stdout(Stdio::piped()).args([
                         "-4",
@@ -474,6 +483,20 @@ pub(crate) fn powershell(script: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_bootstrap_checks_both_installers_independently() {
+        let installer = server_installer();
+        assert!(!installer.contains('\r'));
+        assert!(installer.contains(&format!("if {VPN_REQUIRED}; then\n(")));
+        assert!(installer.contains(&format!("if {INVITATIONS_REQUIRED}; then\n(")));
+        assert!(installer.contains("touch /var/lib/ssh-tunnel-invites/installed-v1"));
+        let command = server_command(installer.len());
+        assert!(command.contains(&format!(
+            "if {VPN_REQUIRED} || {INVITATIONS_REQUIRED}; then"
+        )));
+        assert!(command.contains(&format!("head -c {}", installer.len())));
+    }
 
     #[test]
     fn vpn_stream_accepts_optional_install_request_before_packet_frames() {

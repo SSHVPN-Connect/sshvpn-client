@@ -99,7 +99,10 @@ pub struct Desktop {
     client: Client,
     assets: Assets,
     running_apps: crate::running_apps::Picker,
+    invitations: crate::invite_ui::InviteUi,
     closing: bool,
+    tray: Option<crate::tray::Tray>,
+    tray_initialized: bool,
     update: Option<JoinHandle<Result<Option<std::path::PathBuf>, String>>>,
 }
 
@@ -114,7 +117,10 @@ impl Desktop {
             client,
             assets: Assets::load(ctx)?,
             running_apps: crate::running_apps::Picker::default(),
+            invitations: crate::invite_ui::InviteUi::default(),
             closing: false,
+            tray: None,
+            tray_initialized: false,
             update: None,
         })
     }
@@ -153,7 +159,7 @@ impl Desktop {
 
             let mut selected = None;
             let mut editing = None;
-            let list_height = (height - 290.0).max(100.0);
+            let list_height = (height - 370.0).max(92.0);
             egui::ScrollArea::vertical()
                 .max_height(list_height)
                 .show(ui, |ui| {
@@ -238,6 +244,24 @@ impl Desktop {
                 }
                 self.client.report(result, None);
             }
+            ui.add_enabled_ui(manageable, |ui| {
+                use crate::invite_ui::Operation;
+                if ui.button("Импортировать приглашение").clicked() {
+                    self.invitations.open(Operation::Import);
+                }
+                if self.client.profiles.selected.is_some()
+                    && self.client.draft.connection.user == "root"
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Поделиться").clicked() {
+                            self.invitations.open(Operation::Share);
+                        }
+                        if ui.small_button("Отозвать доступ").clicked() {
+                            self.invitations.open(Operation::Revoke);
+                        }
+                    });
+                }
+            });
         });
     }
 
@@ -692,11 +716,37 @@ impl Desktop {
         if self.client.editing {
             self.editor(ctx);
         }
+        self.invitations.show(ctx, &mut self.client);
     }
 }
 
 impl eframe::App for Desktop {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if !self.tray_initialized {
+            self.tray_initialized = true;
+            match crate::tray::Tray::new(ctx, frame) {
+                Ok(tray) => self.tray = Some(tray),
+                Err(error) if self.client.notice.is_none() => self.client.report(
+                    Err(format!("Не удалось создать значок в трее: {error}")),
+                    None,
+                ),
+                Err(_) => {}
+            }
+        }
+        while let Some(event) = self.tray.as_ref().and_then(crate::tray::Tray::next) {
+            match event {
+                crate::tray::Action::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                crate::tray::Action::Quit => {
+                    self.closing = true;
+                    self.client.next_profile = None;
+                    self.client.disconnect();
+                }
+            }
+        }
         if self
             .update
             .as_ref()
@@ -717,6 +767,7 @@ impl eframe::App for Desktop {
                 {
                     match crate::updater::launch(installer) {
                         Ok(()) => {
+                            self.closing = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             return;
                         }
@@ -743,6 +794,12 @@ impl eframe::App for Desktop {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
         if ctx.input(|input| input.viewport().close_requested())
+            && !self.closing
+            && self.tray.is_some()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        } else if ctx.input(|input| input.viewport().close_requested())
             && (self.client.tunnel.is_some() || self.client.disconnecting.is_some())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);

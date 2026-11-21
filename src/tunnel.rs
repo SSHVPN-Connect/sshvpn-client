@@ -17,6 +17,7 @@ pub struct Profile {
     pub user: String,
     pub socks_port: u16,
     pub key: String,
+    pub host_key: Option<String>,
 }
 
 impl Default for Profile {
@@ -26,6 +27,7 @@ impl Default for Profile {
             user: String::new(),
             socks_port: 1080,
             key: String::new(),
+            host_key: None,
         }
     }
 }
@@ -74,6 +76,7 @@ pub struct Tunnel {
     netstat: PathBuf,
     next_probe: Instant,
     ready: bool,
+    _known_host: Option<tempfile::NamedTempFile>,
 }
 
 impl Tunnel {
@@ -95,6 +98,7 @@ impl Tunnel {
         );
 
         let (mut command, diagnostics) = ssh_command(profile, password_auth, secret)?;
+        let known_host = pin_host(&mut command, profile)?;
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -121,14 +125,49 @@ impl Tunnel {
             netstat,
             next_probe: Instant::now(),
             ready: false,
+            _known_host: known_host,
         })
     }
+}
+
+pub fn pin_host(
+    command: &mut Command,
+    profile: &Profile,
+) -> Result<Option<tempfile::NamedTempFile>, String> {
+    use std::io::Write as _;
+    let Some(ref key) = profile.host_key else {
+        return Ok(None);
+    };
+    if !crate::invites::valid_public_key(key) {
+        return Err("Неверный публичный ключ SSH-сервера.".into());
+    }
+    let mut file = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    writeln!(file, "{} {key}", profile.server).map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())?;
+    command.args([
+        "-o",
+        &format!("UserKnownHostsFile=\"{}\"", file.path().display()),
+        "-o",
+        "GlobalKnownHostsFile=none",
+        "-o",
+        "HostKeyAlgorithms=ssh-ed25519",
+    ]);
+    Ok(Some(file))
 }
 
 pub fn ssh_command(
     profile: &Profile,
     password_auth: bool,
     secret: String,
+) -> Result<(Command, fs::File), String> {
+    ssh_command_policy(profile, password_auth, secret, false)
+}
+
+pub fn ssh_command_policy(
+    profile: &Profile,
+    password_auth: bool,
+    secret: String,
+    strict: bool,
 ) -> Result<(Command, fs::File), String> {
     let ssh = system_program(r"OpenSSH\ssh.exe")?;
     if !ssh.is_file() {
@@ -152,7 +191,11 @@ pub fn ssh_command(
             "-o",
             "ServerAliveCountMax=3",
             "-o",
-            "StrictHostKeyChecking=accept-new",
+            if strict || profile.host_key.is_some() {
+                "StrictHostKeyChecking=yes"
+            } else {
+                "StrictHostKeyChecking=accept-new"
+            },
             "-o",
             "NumberOfPasswordPrompts=1",
         ]);
@@ -177,6 +220,9 @@ pub fn ssh_command(
     }
     if !profile.key.is_empty() {
         command.args(["-i", &profile.key]);
+        if profile.host_key.is_some() {
+            command.args(["-o", "IdentitiesOnly=yes"]);
+        }
     }
     Ok((command, diagnostics))
 }
