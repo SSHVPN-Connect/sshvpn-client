@@ -12,7 +12,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     os::windows::process::CommandExt,
     path::Path,
     process::{Command, Stdio},
@@ -41,6 +41,23 @@ pub struct Invitation {
     pub code: String,
     pub user: String,
     pub expires: String,
+}
+
+#[derive(Deserialize)]
+pub struct AccessEntry {
+    pub user: String,
+    pub name: String,
+    pub state: AccessState,
+    pub last_connected: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessState {
+    Pending,
+    Active,
+    Expired,
+    Revoked,
 }
 
 pub struct Imported {
@@ -167,9 +184,18 @@ fn request<T: DeserializeOwned>(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().expect("piped SSH output");
+    let reader = std::thread::spawn(move || {
+        let mut data = Vec::new();
+        stdout.read_to_end(&mut data)?;
+        Ok::<_, std::io::Error>(data)
+    });
     let write = writeln!(child.stdin.take().expect("piped SSH input"), "{data}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
-    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
@@ -179,20 +205,21 @@ fn request<T: DeserializeOwned>(
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
+    };
+    if !status.success() {
         return Err(ssh_error(
             &mut diagnostics,
-            format!("SSH invitation failed: {}", output.status),
+            format!("SSH invitation failed: {status}"),
         ));
     }
     write.map_err(|e| e.to_string())?;
-    serde_json::from_slice(&output.stdout)
+    let data = reader.join().map_err(|_| "Не удалось прочитать ответ SSH.")?
+        .map_err(|error| error.to_string())?;
+    serde_json::from_slice(&data)
         .map_err(|_| "Сервер вернул неверный ответ приглашения.".into())
 }
 
-pub fn issue(profile: SavedProfile, secret: String) -> Result<Invitation, String> {
+pub fn issue(profile: SavedProfile, secret: String, name: String) -> Result<Invitation, String> {
     if profile.connection.user != "root" {
         return Err("Для выдачи приглашений нужен профиль SSH с пользователем root.".into());
     }
@@ -205,7 +232,7 @@ pub fn issue(profile: SavedProfile, secret: String) -> Result<Invitation, String
         profile.authentication == Authentication::Password,
         secret,
         "issue",
-        json!({ "public_key": staging_key }),
+        json!({ "public_key": staging_key, "name": name }),
     )?;
     if !valid_user(&issued.user) || !valid_public_key(&issued.host_key) {
         return Err("Сервер вернул неверную учётную запись или ключ.".into());
@@ -294,6 +321,19 @@ pub fn revoke(profile: SavedProfile, secret: String, user: String) -> Result<(),
         return Err("Сервер не подтвердил отзыв доступа.".into());
     }
     Ok(())
+}
+
+pub fn list(profile: &SavedProfile, secret: String) -> Result<Vec<AccessEntry>, String> {
+    if profile.connection.user != "root" {
+        return Err("Просмотр приглашений доступен владельцу сервера.".into());
+    }
+    request(
+        &profile.connection,
+        profile.authentication == Authentication::Password,
+        secret,
+        "list",
+        json!({}),
+    )
 }
 
 #[cfg(test)]

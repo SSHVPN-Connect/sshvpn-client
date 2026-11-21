@@ -168,7 +168,7 @@ impl Desktop {
                         ui.label(RichText::new("Нет сохранённых профилей").color(MUTED));
                     }
                     for (index, profile) in self.client.profiles.entries.iter().enumerate() {
-                        ui.add_enabled_ui(!stopping, |ui| {
+                        ui.add_enabled_ui(manageable, |ui| {
                             ui.horizontal(|ui| {
                                 let (rect, response, hover) =
                                     control(ui, vec2(192.0, 61.0), &profile.name);
@@ -234,7 +234,7 @@ impl Desktop {
             );
 
             if let Some(index) = selected {
-                let result = self.client.connect_profile(index);
+                let result = self.client.select(Some(index));
                 self.client.report(result, None);
             }
             if let Some(index) = editing {
@@ -256,8 +256,8 @@ impl Desktop {
                         if ui.button("Поделиться").clicked() {
                             self.invitations.open(Operation::Share);
                         }
-                        if ui.small_button("Отозвать доступ").clicked() {
-                            self.invitations.open(Operation::Revoke);
+                        if ui.button("Выданные приглашения").clicked() {
+                            self.invitations.open(Operation::Manage);
                         }
                     });
                 }
@@ -742,7 +742,6 @@ impl eframe::App for Desktop {
                 }
                 crate::tray::Action::Quit => {
                     self.closing = true;
-                    self.client.next_profile = None;
                     self.client.disconnect();
                 }
             }
@@ -804,7 +803,6 @@ impl eframe::App for Desktop {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.closing = true;
-            self.client.next_profile = None;
             self.client.disconnect();
         }
         self.client.poll_disconnect();
@@ -1008,7 +1006,6 @@ mod tests {
             password: String::new(),
             tunnel: None,
             disconnecting: None,
-            next_profile: None,
             notice: None,
             confirming_delete: false,
             editing: false,

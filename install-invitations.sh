@@ -18,6 +18,7 @@ cat > "$temp" <<'PYTHON'
 import base64
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -30,6 +31,7 @@ import tempfile
 
 KEYS = Path("/etc/ssh/ssh-tunnel-invites")
 STATE = Path("/var/lib/ssh-tunnel-invites")
+RECORDS = STATE / "records"
 OWNER = "/usr/local/libexec/ssh-tunnel-invite"
 SESSION = "/usr/local/libexec/ssh-tunnel-invite-session"
 LEGACY_KEY = 'restrict,port-forwarding,command="/bin/false" '
@@ -52,16 +54,92 @@ def account(value):
     return value
 
 
-def write_key(destination, content):
-    with tempfile.NamedTemporaryFile(dir=KEYS, delete=False) as output:
+def write_file(destination, content, mode):
+    with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
         try:
-            os.fchmod(output.fileno(), 0o644)
+            os.fchmod(output.fileno(), mode)
             output.write((content + "\n").encode())
             output.flush()
             os.fsync(output.fileno())
             os.replace(output.name, destination)
         finally:
             Path(output.name).unlink(missing_ok=True)
+
+
+def write_key(destination, content):
+    write_file(destination, content, 0o644)
+
+
+def read_record(user):
+    try:
+        return json.loads((RECORDS / user).read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def save_record(user, record):
+    write_file(RECORDS / user, json.dumps(record), 0o600)
+
+
+def fingerprint(key):
+    digest = hashlib.sha256(base64.b64decode(key.split()[1])).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+def invitation_state(user, record):
+    try:
+        key = (KEYS / user).read_text().strip()
+    except FileNotFoundError:
+        return "revoked", record.get("fingerprint")
+    match = re.match(r'restrict,expiry-time="([0-9]{14}Z)",command=', key)
+    if match:
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%SZ")
+        return ("pending" if match[1] > now else "expired"), None
+    return "active", fingerprint(public_key(key.split(" ", 1)[1]))
+
+
+def list_access(_data):
+    entries = []
+    fingerprints = {}
+    for user in sorted({path.name for directory in (KEYS, RECORDS) for path in directory.iterdir()}):
+        if not re.fullmatch(r"stv_[0-9a-f]{16}", user):
+            continue
+        with (STATE / user).open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            record = read_record(user)
+            if not record and not (KEYS / user).exists():
+                continue
+            state, key = invitation_state(user, record)
+        entry = {"user": user, "name": record.get("name", ""), "state": state,
+                 "last_connected": None}
+        entries.append(entry)
+        if key:
+            fingerprints[user, key] = entry
+    if not fingerprints:
+        return entries
+    pattern = r"^Accepted publickey for (stv_[0-9a-f]{16}) from .* (SHA256:[A-Za-z0-9+/]+)$"
+    with subprocess.Popen(
+        ["journalctl", "--quiet", "--no-pager", "--reverse", "--output=json",
+         "--output-fields=MESSAGE", "--identifier=sshd", "--identifier=sshd-session",
+         "--grep", pattern, "_UID=0"],
+        stdout=subprocess.PIPE, text=True,
+    ) as journal:
+        for line in journal.stdout:
+            event = json.loads(line)
+            match = re.fullmatch(pattern, event.get("MESSAGE", ""))
+            if match:
+                entry = fingerprints.pop(match.groups(), None)
+                if entry is not None:
+                    seconds = int(event["__REALTIME_TIMESTAMP"]) // 1_000_000
+                    entry["last_connected"] = datetime.datetime.fromtimestamp(
+                        seconds, datetime.timezone.utc
+                    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+            if not fingerprints:
+                journal.terminate()
+                return entries
+        if journal.wait() not in (0, 1):
+            raise RuntimeError("Could not read the SSH journal.")
+    return entries
 
 
 def request():
@@ -73,6 +151,9 @@ def request():
 
 def issue(data):
     key = public_key(data["public_key"])
+    name = data.get("name", "").strip()
+    if len(name) > 80 or any(not char.isprintable() for char in name):
+        raise ValueError("Invalid recipient name.")
     host = public_key(" ".join(Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text().split()[:2]))
     user = "stv_" + secrets.token_hex(8)
     expiry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)).strftime("%Y%m%d%H%M%SZ")
@@ -81,8 +162,15 @@ def issue(data):
     subprocess.run(["useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent",
                     "--gid", "ssh-tunnel-share", "--shell", "/bin/sh", "--password", password, user], check=True)
     try:
-        command = f'restrict,expiry-time="{expiry}",command="/usr/bin/sudo -n {OWNER} redeem"'
-        write_key(KEYS / user, f"{command} {key}")
+        with (STATE / user).open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            save_record(user, {"name": name})
+            try:
+                command = f'restrict,expiry-time="{expiry}",command="/usr/bin/sudo -n {OWNER} redeem"'
+                write_key(KEYS / user, f"{command} {key}")
+            except BaseException:
+                (RECORDS / user).unlink(missing_ok=True)
+                raise
     except BaseException:
         subprocess.run(["userdel", user], check=False)
         raise
@@ -125,6 +213,10 @@ def revoke(data):
     user = account(data["user"])
     with (STATE / user).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        record = read_record(user)
+        if (KEYS / user).exists():
+            _state, key = invitation_state(user, record)
+            save_record(user, {**record, "fingerprint": key})
         (KEYS / user).unlink(missing_ok=True)
         result = subprocess.run(["id", "-gn", user], capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip() == "ssh-tunnel-share":
@@ -143,12 +235,13 @@ if __name__ == "__main__":
         if operation == "upgrade":
             upgrade()
             sys.exit(0)
-        result = {"issue": issue, "redeem": redeem, "revoke": revoke}[operation](request())
+        result = {"issue": issue, "redeem": redeem, "revoke": revoke, "list": list_access}[operation](request())
         print(json.dumps(result))
-    except (OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
         print(f"SSH Tunnel invitations: {error}", file=sys.stderr)
         sys.exit(1)
 PYTHON
+install -d -m 0700 /var/lib/ssh-tunnel-invites/records
 install -m 0755 "$temp" /usr/local/libexec/ssh-tunnel-invite
 cat > "$temp" <<'SESSION'
 #!/bin/sh
@@ -196,5 +289,5 @@ if ! systemctl reload ssh; then
     exit 1
 fi
 env -u SUDO_USER /usr/local/libexec/ssh-tunnel-invite upgrade
-touch /var/lib/ssh-tunnel-invites/installed-v1 /var/lib/ssh-tunnel-invites/installed-v2
+touch /var/lib/ssh-tunnel-invites/installed-v1 /var/lib/ssh-tunnel-invites/installed-v2 /var/lib/ssh-tunnel-invites/installed-v3
 printf '%s\n' 'SSH Tunnel invitations are installed on port 22.'

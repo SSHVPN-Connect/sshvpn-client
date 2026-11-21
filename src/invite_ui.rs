@@ -6,13 +6,13 @@ use std::thread::{self, JoinHandle};
 pub enum Operation {
     Share,
     Import,
-    Revoke,
+    Manage,
 }
 
 enum Completion {
     Shared(invites::Invitation),
     Imported(Box<invites::Imported>),
-    Revoked,
+    Access(Vec<invites::AccessEntry>, bool),
 }
 
 #[derive(Default)]
@@ -23,7 +23,9 @@ pub struct InviteUi {
     error: Option<String>,
     encoded: String,
     code: String,
-    username: String,
+    recipient: String,
+    revoke_user: Option<String>,
+    load_access: bool,
     ssh_secret: String,
 }
 
@@ -32,6 +34,7 @@ impl InviteUi {
         if self.worker.is_none() && !matches!(self.result, Some(Completion::Imported(_))) {
             *self = Self {
                 operation: Some(operation),
+                load_access: operation == Operation::Manage,
                 ..Self::default()
             };
         }
@@ -61,16 +64,17 @@ impl InviteUi {
         if self.worker.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        let mut start = false;
+        let mut start = std::mem::take(&mut self.load_access);
+        let mut revoke = false;
         let mut save_import =
             matches!(self.result, Some(Completion::Imported(_))) && self.error.is_none();
         let mut close = false;
         let modal = egui::Modal::new(egui::Id::new("invitation")).show(ctx, |ui| {
-            ui.set_width(430.0);
+            ui.set_width(if operation == Operation::Manage { 540.0 } else { 430.0 });
             ui.heading(match operation {
                 Operation::Share => "Поделиться профилем",
                 Operation::Import => "Импортировать приглашение",
-                Operation::Revoke => "Отозвать доступ",
+                Operation::Manage => "Выданные приглашения",
             });
             if self.worker.is_some() {
                 ui.spinner();
@@ -87,25 +91,65 @@ impl InviteUi {
                     Some(Completion::Imported(_)) => {
                         if ui.button("Сохранить импортированный профиль").clicked() { save_import = true; }
                     }
-                    Some(Completion::Revoked) => { ui.label("Доступ отозван."); }
+                    Some(Completion::Access(entries, revoked)) => {
+                        if *revoked { ui.label("Доступ отозван."); }
+                        if entries.is_empty() { ui.label("Приглашений пока нет."); }
+                        egui::ScrollArea::vertical().max_height(275.0).show(ui, |ui| {
+                            for entry in entries {
+                                let (status, revocable) = match entry.state {
+                                    invites::AccessState::Active => ("Активировано", true),
+                                    invites::AccessState::Pending => ("Ожидает активации", true),
+                                    invites::AccessState::Expired => ("Срок истёк", false),
+                                    invites::AccessState::Revoked => ("Доступ отозван", false),
+                                };
+                                ui.group(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        let name = if entry.name.is_empty() { &entry.user } else { &entry.name };
+                                        ui.strong(name).on_hover_text(&entry.user);
+                                        ui.label(status);
+                                        if revocable && ui.small_button("Отозвать").clicked() {
+                                            self.revoke_user = Some(entry.user.clone());
+                                        }
+                                    });
+                                    let last = entry.last_connected.as_deref().unwrap_or("нет записи в журнале SSH");
+                                    ui.label(format!("Последнее подключение: {last}"));
+                                    if self.revoke_user.as_deref() == Some(&entry.user) {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label("Закрыть доступ этому пользователю?");
+                                            revoke = ui.button("Подтвердить отзыв").clicked();
+                                            if ui.button("Отмена").clicked() { self.revoke_user = None; }
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                    }
                     None => {
                         if operation == Operation::Import {
                             ui.label("Вставьте строку приглашения и отдельный код.");
                             ui.add(egui::TextEdit::multiline(&mut self.encoded).desired_rows(3).desired_width(f32::INFINITY));
                             ui.add(egui::TextEdit::singleline(&mut self.code).password(true).hint_text("Код расшифровки"));
                         } else {
-                            if operation == Operation::Revoke {
-                                ui.add(egui::TextEdit::singleline(&mut self.username).hint_text("Имя пользователя stv_…"));
+                            if operation == Operation::Share {
+                                ui.add(egui::TextEdit::singleline(&mut self.recipient).char_limit(80)
+                                    .hint_text("Имя получателя (необязательно)"));
+                                ui.add(egui::TextEdit::singleline(&mut self.ssh_secret).password(true)
+                                    .hint_text("Пароль SSH или фраза ключа, если требуется"));
                             }
-                            ui.add(egui::TextEdit::singleline(&mut self.ssh_secret).password(true)
-                                .hint_text("Пароль SSH или фраза ключа, если требуется"));
                         }
-                        start = ui.button(match operation {
-                            Operation::Share => "Создать приглашение",
-                            Operation::Import => "Активировать",
-                            Operation::Revoke => "Отозвать",
-                        }).clicked();
+                        if operation != Operation::Manage {
+                            start = ui.button(if operation == Operation::Share {
+                                "Создать приглашение"
+                            } else {
+                                "Активировать"
+                            }).clicked();
+                        }
                     }
+                }
+                if operation == Operation::Manage {
+                    ui.add(egui::TextEdit::singleline(&mut self.ssh_secret).password(true)
+                        .hint_text("Пароль SSH или фраза ключа, если требуется"));
+                    start |= ui.button("Обновить список").clicked();
                 }
                 if let Some(error) = &self.error { ui.colored_label(egui::Color32::LIGHT_RED, error); }
                 close = !matches!(self.result, Some(Completion::Imported(_))) && ui.button("Закрыть").clicked();
@@ -142,7 +186,7 @@ impl InviteUi {
                 }
             }
         }
-        if start {
+        if start || revoke {
             self.error = None;
             if operation == Operation::Import {
                 let Ok(base) = client.directory.clone() else {
@@ -172,12 +216,17 @@ impl InviteUi {
                 } else {
                     std::mem::take(&mut self.ssh_secret)
                 };
-                let username = self.username.trim().to_owned();
+                let user = if revoke { self.revoke_user.take() } else { None };
+                let recipient = self.recipient.trim().to_owned();
                 self.worker = Some(thread::spawn(move || {
                     if operation == Operation::Share {
-                        invites::issue(profile, secret).map(Completion::Shared)
+                        invites::issue(profile, secret, recipient).map(Completion::Shared)
                     } else {
-                        invites::revoke(profile, secret, username).map(|()| Completion::Revoked)
+                        let revoked = user.is_some();
+                        if let Some(user) = user {
+                            invites::revoke(profile.clone(), secret.clone(), user)?;
+                        }
+                        invites::list(&profile, secret).map(|entries| Completion::Access(entries, revoked))
                     }
                 }));
             }

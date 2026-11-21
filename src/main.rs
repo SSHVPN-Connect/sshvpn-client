@@ -60,7 +60,6 @@ struct Client {
     password: String,
     tunnel: Option<Connection>,
     disconnecting: Option<JoinHandle<std::io::Result<()>>>,
-    next_profile: Option<usize>,
     notice: Option<(String, bool)>,
     confirming_delete: bool,
     editing: bool,
@@ -88,7 +87,6 @@ impl Client {
             password: String::new(),
             tunnel: None,
             disconnecting: None,
-            next_profile: None,
             notice,
             confirming_delete: false,
             editing: false,
@@ -262,42 +260,23 @@ impl Client {
                 .join()
                 .map_err(|_| "VPN cleanup worker stopped unexpectedly.".to_owned())
                 .and_then(|result| result.map_err(|error| error.to_string()));
-            let next = self.next_profile.take();
             if let Err(error) = result {
                 self.report(Err(error), None);
-            } else if let Some(index) = next {
-                let result = self.connect_profile(index);
-                self.report(result, None);
             }
         }
     }
 
     fn connect_profile(&mut self, index: usize) -> Result<(), String> {
-        if self.disconnecting.is_some() {
-            return Err("Дождитесь завершения отключения.".into());
-        }
-        if self.tunnel.is_some() && self.profiles.selected == Some(index) {
-            return Ok(());
-        }
         self.ensure_saved()?;
         let profile = self.profiles.entries[index].clone();
         profile.connection.validate()?;
         let secret = match Self::connection_secret(&profile) {
             Ok(secret) => secret,
-            Err(error) if self.tunnel.is_none() => {
-                self.select(Some(index))?;
+            Err(error) => {
                 self.editing = true;
                 return Err(error);
             }
-            Err(error) => return Err(error),
         };
-        if self.tunnel.is_some() {
-            self.next_profile = Some(index);
-            self.disconnect();
-            return Ok(());
-        }
-        self.select(Some(index))?;
-        self.editing = false;
         self.start_connection(profile, secret)
     }
 
@@ -307,7 +286,7 @@ impl Client {
                 "Windows could not unlock this credential. Enter it again in Edit.".into()
             }),
             None if profile.authentication == Authentication::Password => {
-                Err("Enter the SSH password and save the profile for one-click connection.".into())
+                Err("Enter the SSH password and save the profile before connecting.".into())
             }
             None => Ok(String::new()),
         }
@@ -380,7 +359,6 @@ mod tests {
             password: "in-memory secret".into(),
             tunnel: None,
             disconnecting: None,
-            next_profile: None,
             notice: None,
             confirming_delete: false,
             editing: true,
@@ -425,7 +403,7 @@ mod tests {
         client.local_port = occupied.local_addr().unwrap().port().to_string();
         client.save_profile().unwrap();
         assert!(client
-            .connect_profile(1)
+            .toggle_connection()
             .unwrap_err()
             .contains("Cannot use local address"));
         client.draft.name = "Renamed Office".into();
