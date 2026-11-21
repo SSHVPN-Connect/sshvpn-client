@@ -118,27 +118,32 @@ def list_access(_data):
     if not fingerprints:
         return entries
     pattern = r"^Accepted publickey for (stv_[0-9a-f]{16}) from .* (SHA256:[A-Za-z0-9+/]+)$"
-    with subprocess.Popen(
-        ["journalctl", "--quiet", "--no-pager", "--reverse", "--output=json",
-         "--output-fields=MESSAGE", "--identifier=sshd", "--identifier=sshd-session",
-         "--grep", pattern, "_UID=0"],
-        stdout=subprocess.PIPE, text=True,
-    ) as journal:
-        for line in journal.stdout:
+    try:
+        output = subprocess.run(
+            ["journalctl", "--quiet", "--no-pager", "--reverse", "--output=json",
+             "--lines=4096", "--output-fields=MESSAGE", "--identifier=sshd",
+             "--identifier=sshd-session", "--grep", pattern, "_UID=0"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=6,
+        ).stdout
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or b""
+    except OSError:
+        return entries
+    for line in output.splitlines():
+        try:
             event = json.loads(line)
             match = re.fullmatch(pattern, event.get("MESSAGE", ""))
-            if match:
-                entry = fingerprints.pop(match.groups(), None)
-                if entry is not None:
-                    seconds = int(event["__REALTIME_TIMESTAMP"]) // 1_000_000
-                    entry["last_connected"] = datetime.datetime.fromtimestamp(
-                        seconds, datetime.timezone.utc
-                    ).strftime("%Y-%m-%d %H:%M:%S UTC")
-            if not fingerprints:
-                journal.terminate()
-                return entries
-        if journal.wait() not in (0, 1):
-            raise RuntimeError("Could not read the SSH journal.")
+            if not match or match.groups() not in fingerprints:
+                continue
+            seconds = int(event["__REALTIME_TIMESTAMP"]) // 1_000_000
+            last_connected = datetime.datetime.fromtimestamp(
+                seconds, datetime.timezone.utc
+            ).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except (ValueError, TypeError, KeyError, OverflowError, OSError):
+            continue
+        fingerprints.pop(match.groups())["last_connected"] = last_connected
+        if not fingerprints:
+            break
     return entries
 
 
@@ -235,6 +240,9 @@ if __name__ == "__main__":
         if operation == "upgrade":
             upgrade()
             sys.exit(0)
+        if operation == "list-v2":
+            print(json.dumps(list_access(None)))
+            sys.exit(0)
         result = {"issue": issue, "redeem": redeem, "revoke": revoke, "list": list_access}[operation](request())
         print(json.dumps(result))
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
@@ -289,5 +297,5 @@ if ! systemctl reload ssh; then
     exit 1
 fi
 env -u SUDO_USER /usr/local/libexec/ssh-tunnel-invite upgrade
-touch /var/lib/ssh-tunnel-invites/installed-v1 /var/lib/ssh-tunnel-invites/installed-v2 /var/lib/ssh-tunnel-invites/installed-v3
+touch /var/lib/ssh-tunnel-invites/installed-v1 /var/lib/ssh-tunnel-invites/installed-v2 /var/lib/ssh-tunnel-invites/installed-v3 /var/lib/ssh-tunnel-invites/installed-v4
 printf '%s\n' 'SSH Tunnel invitations are installed on port 22.'

@@ -20,6 +20,7 @@ use std::{
 
 const VERSION: &str = "ssh-tunnel-invite-1";
 const HANDLER: &str = "/usr/local/libexec/ssh-tunnel-invite";
+const LIST_COMMAND: &str = "/usr/local/libexec/ssh-tunnel-invite list-v2";
 pub(crate) const INSTALLER: &str = include_str!("../install-invitations.sh");
 pub(crate) const UPDATE_REQUIRED: &str =
     "На сервере установлена старая версия поддержки приглашений. Нажмите «Обновить сервер».";
@@ -183,7 +184,7 @@ fn request<T: DeserializeOwned>(
         password_auth,
         secret,
         &format!("{HANDLER} {operation}"),
-        &data.to_string(),
+        &format!("{data}\n"),
         35,
     )
 }
@@ -201,7 +202,11 @@ fn exchange<T: DeserializeOwned>(
     let _pin = pin_host(&mut command, profile)?;
     command
         .args(["--", &profile.server, remote])
-        .stdin(Stdio::piped())
+        .stdin(if input.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::piped());
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     let mut stdout = child.stdout.take().expect("piped SSH output");
@@ -213,8 +218,7 @@ fn exchange<T: DeserializeOwned>(
     let write = child
         .stdin
         .take()
-        .expect("piped SSH input")
-        .write_all(input.as_bytes());
+        .map_or(Ok(()), |mut stdin| stdin.write_all(input.as_bytes()));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
@@ -352,16 +356,17 @@ pub fn list(profile: &SavedProfile, secret: String) -> Result<Vec<AccessEntry>, 
     if profile.connection.user != "root" {
         return Err("Просмотр приглашений доступен владельцу сервера.".into());
     }
-    request(
+    exchange(
         &profile.connection,
         profile.authentication == Authentication::Password,
         secret,
-        "list",
-        json!({}),
+        LIST_COMMAND,
+        "",
+        35,
     )
     .map_err(|error| {
         if error.lines().any(|line| {
-            line.trim() == "SSH Tunnel invitations: 'list'"
+            line.trim() == "SSH Tunnel invitations: 'list-v2'"
                 || (line.contains(HANDLER) && line.contains("No such file or directory"))
         }) {
             UPDATE_REQUIRED.to_owned()
@@ -392,7 +397,7 @@ fi
     flock -w 120 9
     sh "$script" </dev/null >&2
 ) 9>/run/ssh-tunnel-vpn-install.lock
-printf '%s\n' '{{}}' | {HANDLER} list"#
+exec {LIST_COMMAND}"#
     );
     exchange(
         &profile.connection,

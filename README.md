@@ -69,9 +69,10 @@ cargo +stable-x86_64-pc-windows-gnu build --release --locked
 рядом с `ssh-tunnel.exe`.
 
 Чтобы собрать установщик, установи [Inno Setup](https://jrsoftware.org/inno-setup/downloads),
-положи `ssh-tunnel.exe`, `wintun.dll` и `WINTUN-LICENSE.txt` в папку сборки
-и вызови `ISCC.exe /DAppVersion=0.4.5 /DPayloadDir=ПОЛНЫЙ_ПУТЬ installer\ssh-tunnel.iss`.
-Версия должна совпадать с `Cargo.toml`, а тег релиза — иметь вид `v0.4.5`.
+положи `wintun.dll` и `WINTUN-LICENSE.txt` в `target\release` и запусти
+`.\installer\build-release.ps1` из PowerShell. Если `ISCC.exe` отсутствует в
+PATH, передай полный путь через `-InnoCompiler`. Версия берётся из `Cargo.toml`.
+После успешной сборки новый установщик заменит `target\release\ssh-tunnel-setup-x64.exe`.
 
 ## 3. Подключиться
 

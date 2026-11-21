@@ -6,17 +6,17 @@ use eframe::egui::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-pub(crate) const BACKGROUND: Color32 = Color32::from_rgb(16, 16, 25);
-const RAIL: Color32 = Color32::from_rgb(24, 24, 37);
+pub(crate) const BACKGROUND: Color32 = Color32::from_rgb(16, 19, 26);
+const RAIL: Color32 = Color32::from_rgb(24, 29, 39);
 const CARD: Color32 = RAIL;
-const ROW: Color32 = Color32::from_rgb(34, 33, 53);
-const BORDER: Color32 = Color32::from_rgb(55, 52, 77);
-const TEXT: Color32 = Color32::from_rgb(243, 239, 252);
-pub(crate) const MUTED: Color32 = Color32::from_rgb(186, 179, 206);
-const LAVENDER: Color32 = Color32::from_rgb(208, 188, 255);
-const MINT: Color32 = Color32::from_rgb(157, 231, 207);
+const ROW: Color32 = Color32::from_rgb(36, 44, 57);
+const BORDER: Color32 = Color32::from_rgb(51, 61, 80);
+const TEXT: Color32 = Color32::from_rgb(242, 244, 252);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(173, 184, 205);
+const LAVENDER: Color32 = Color32::from_rgb(202, 186, 255);
+const MINT: Color32 = Color32::from_rgb(158, 231, 197);
 const PRIMARY: Color32 = LAVENDER;
-const HOVER: Color32 = Color32::from_rgb(52, 40, 73);
+const HOVER: Color32 = Color32::from_rgb(41, 37, 62);
 const SOFT: Color32 = Color32::from_rgb(46, 36, 69);
 pub(crate) const ERROR: Color32 = Color32::from_rgb(255, 180, 189);
 const HOVER_DURATION: f32 = 0.16;
@@ -95,6 +95,7 @@ pub struct Desktop {
     access: crate::invite_ui::InviteUi,
     access_owner: Option<crate::tunnel::Profile>,
     routing: Option<crate::profiles::Ipv4Routing>,
+    animate_connection: bool,
     closing: bool,
     tray: Option<crate::tray::Tray>,
     tray_initialized: bool,
@@ -107,6 +108,11 @@ impl Desktop {
         visuals.override_text_color = Some(TEXT);
         visuals.extreme_bg_color = BACKGROUND;
         visuals.selection.bg_fill = HOVER;
+        visuals.widgets.inactive.bg_fill = ROW;
+        visuals.widgets.inactive.weak_bg_fill = ROW;
+        visuals.widgets.hovered.bg_fill = HOVER;
+        visuals.widgets.hovered.weak_bg_fill = HOVER;
+        visuals.widgets.active.bg_fill = HOVER;
         ctx.set_visuals(visuals);
         Ok(Self {
             client,
@@ -116,6 +122,7 @@ impl Desktop {
             access: crate::invite_ui::InviteUi::default(),
             access_owner: None,
             routing: None,
+            animate_connection: windows_allows_motion(),
             closing: false,
             tray: None,
             tray_initialized: false,
@@ -174,10 +181,18 @@ impl Desktop {
                                 ui.painter().rect(
                                     rect,
                                     15.0,
-                                    mix(ROW, HOVER, hover),
+                                    mix(if current { HOVER } else { CARD }, ROW, hover),
                                     Stroke::new(
                                         1.0_f32,
-                                        mix(if current { HOVER } else { BORDER }, LAVENDER, hover),
+                                        mix(
+                                            if current {
+                                                Color32::from_rgb(105, 85, 154)
+                                            } else {
+                                                BORDER
+                                            },
+                                            LAVENDER,
+                                            hover,
+                                        ),
                                     ),
                                     StrokeKind::Inside,
                                 );
@@ -334,7 +349,28 @@ impl Desktop {
             _ => format!("127.0.0.1:{}", self.client.draft.connection.socks_port),
         };
         let mut connect = false;
-        surface(Color32::from_rgb(35, 28, 53), 22, 24).show(ui, |ui| {
+        let transition = if self.animate_connection {
+            ui.ctx()
+                .animate_bool_with_time(ui.id().with("tunnel-ready"), ready, 0.28)
+        } else if ready {
+            1.0
+        } else {
+            0.0
+        };
+        surface(
+            mix(
+                Color32::from_rgb(28, 32, 48),
+                Color32::from_rgb(25, 41, 35),
+                transition,
+            ),
+            22,
+            24,
+        )
+        .stroke(Stroke::new(
+            1.0_f32,
+            mix(BORDER, Color32::from_rgb(66, 100, 85), transition),
+        ))
+        .show(ui, |ui| {
             let width = ui.available_width();
             ui.set_min_width(width);
             if mode == Mode::SystemVpn {
@@ -345,9 +381,32 @@ impl Desktop {
             {
                 ui.ctx().copy_text(proxy.clone());
             }
-            ui.add_space(8.0);
-            ui.label(RichText::new(status).size(32.0).strong());
-            ui.add_space(14.0);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                tunnel_indicator(
+                    ui,
+                    ready,
+                    active && !ready || stopping,
+                    self.animate_connection,
+                    transition,
+                );
+                ui.add_space(7.0);
+                ui.vertical(|ui| {
+                    ui.add(egui::Label::new(RichText::new(status).size(30.0).strong()).truncate());
+                    let server = self.client.draft.connection.server.trim();
+                    if !server.is_empty() {
+                        ui.add(
+                            egui::Label::new(RichText::new(server).size(13.0).color(MUTED))
+                                .truncate(),
+                        )
+                        .on_hover_text(server);
+                    }
+                });
+            });
+            ui.add_space(11.0);
+            let (divider, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
+            ui.painter().rect_filled(divider, 0.0, BORDER);
+            ui.add_space(10.0);
             let connection_button = |ui: &mut Ui| {
                 ui.add_enabled_ui(!stopping, |ui| pill(ui, action, 117.0, !active))
                     .inner
@@ -402,7 +461,7 @@ impl Desktop {
                         Layout::top_down(Align::Min),
                         |ui| {
                             ui.set_min_width((width - 123.0).max(100.0));
-                            ui.strong("Маршрутизация");
+                            ui.label(RichText::new("Маршрутизация").size(16.0).strong());
                             let routing = &self.client.draft.ipv4_routing;
                             let summary = if routing.by_application {
                                 if routing.applications.is_empty() {
@@ -454,7 +513,7 @@ impl Desktop {
             ui.add_space(16.0);
             surface(CARD, 22, 20).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.strong("Выданные приглашения");
+                ui.label(RichText::new("Выданные приглашения").size(16.0).strong());
                 ui.add_space(8.0);
                 ui.add_enabled_ui(manageable, |ui| {
                     let ctx = ui.ctx().clone();
@@ -871,8 +930,8 @@ pub(crate) fn surface(fill: Color32, radius: u8, padding: i8) -> Frame {
 }
 
 pub(crate) fn dialog_frame() -> Frame {
-    surface(Color32::from_rgb(30, 29, 46), 24, 23)
-        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(81, 69, 108)))
+    surface(Color32::from_rgb(30, 37, 50), 24, 23)
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(67, 78, 103)))
 }
 
 fn text(ui: &Ui, origin: egui::Pos2, value: &str, size: f32, color: Color32) {
@@ -917,6 +976,69 @@ pub(crate) fn badge(ui: &mut Ui, label: &str, active: bool) -> Response {
 
 fn mix(from: Color32, to: Color32, factor: f32) -> Color32 {
     egui::lerp(egui::Rgba::from(from)..=egui::Rgba::from(to), factor).into()
+}
+
+fn windows_allows_motion() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION,
+    };
+    let mut enabled = 0_i32;
+    // SPI_GETCLIENTAREAANIMATION writes one Win32 BOOL to the supplied pointer.
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            (&mut enabled as *mut i32).cast(),
+            0,
+        ) != 0
+            && enabled != 0
+    }
+}
+
+fn tunnel_indicator(ui: &mut Ui, ready: bool, pending: bool, animate: bool, transition: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(54.0, 54.0), Sense::hover());
+    let center = rect.center();
+    let painter = ui.painter();
+    let tint = mix(LAVENDER, MINT, transition);
+    painter.circle_filled(center, 26.0, tint.gamma_multiply(0.10));
+    painter.circle_stroke(
+        center,
+        21.0,
+        Stroke::new(1.0_f32, tint.gamma_multiply(0.35)),
+    );
+    if pending {
+        let phase = if animate {
+            ui.ctx().request_repaint_after(Duration::from_millis(16));
+            ui.input(|input| input.time.rem_euclid(1.05) as f32 / 1.05)
+        } else {
+            0.08
+        };
+        let points = (0..=28)
+            .map(|step| {
+                let angle = (phase + step as f32 / 44.0) * std::f32::consts::TAU;
+                center + vec2(angle.cos(), angle.sin()) * 21.0
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, Stroke::new(2.5_f32, tint)));
+    }
+    if ready {
+        let left = center + vec2(-8.0, 0.0);
+        let mid = center + vec2(-2.0, 6.0);
+        let right = center + vec2(9.0, -6.0);
+        let progress = 1.0 - (1.0 - transition).powi(3);
+        painter.line_segment(
+            [left, left.lerp(mid, (progress * 2.0).min(1.0))],
+            Stroke::new(2.5_f32, tint),
+        );
+        if progress > 0.5 {
+            painter.line_segment(
+                [mid, mid.lerp(right, progress * 2.0 - 1.0)],
+                Stroke::new(2.5_f32, tint),
+            );
+        }
+    } else {
+        painter.circle_filled(center, 3.5, tint);
+    }
 }
 
 fn control(ui: &mut Ui, size: egui::Vec2, label: &str) -> (Rect, Response, f32) {

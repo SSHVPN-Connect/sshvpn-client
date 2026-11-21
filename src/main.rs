@@ -439,10 +439,15 @@ fn main() -> eframe::Result {
     if let Some(result) = askpass::run_helper() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
-    let elevation_notice = match elevation::request() {
-        Ok(elevation::Startup::Relaunched) => return Ok(()),
-        Ok(elevation::Startup::Elevated) => None,
-        Err(error) => Some((error, true)),
+    let debug_ui = cfg!(debug_assertions);
+    let elevation_notice = if debug_ui {
+        None
+    } else {
+        match elevation::request() {
+            Ok(elevation::Startup::Relaunched) => return Ok(()),
+            Ok(elevation::Startup::Elevated) => None,
+            Err(error) => Some((error, true)),
+        }
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -451,7 +456,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "SSH Tunnel",
+        if debug_ui { "SSH Tunnel (Debug)" } else { "SSH Tunnel" },
         options,
         Box::new(move |cc| {
             let mut client = Client::new();

@@ -2,6 +2,174 @@ use crate::{invites, Client};
 use eframe::egui;
 use std::thread::{self, JoinHandle};
 
+enum AccessAction {
+    None,
+    Ask,
+    Cancel,
+    Confirm,
+}
+
+fn access_row(ui: &mut egui::Ui, entry: &invites::AccessEntry, confirming: bool) -> AccessAction {
+    use crate::ui::{pill, surface, BACKGROUND, ERROR, MUTED};
+    let (status, color, fill, revocable) = match entry.state {
+        invites::AccessState::Active => ("Активировано", 0x9fe0c1, 0x203b35, true),
+        invites::AccessState::Pending => ("Ожидает активации", 0xd0bcff, 0x2e2445, true),
+        invites::AccessState::Expired => ("Срок истёк", 0xbab3ce, 0x222135, false),
+        invites::AccessState::Revoked => ("Доступ отозван", 0xbab3ce, 0x222135, false),
+    };
+    let rgb =
+        |value: u32| egui::Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8);
+    let name = if entry.name.is_empty() {
+        &entry.user
+    } else {
+        &entry.name
+    };
+    let last = entry
+        .last_connected
+        .as_deref()
+        .unwrap_or("Нет записи в журнале");
+    let mut action = AccessAction::None;
+    surface(BACKGROUND, 14, 11).show(ui, |ui| {
+        let width = ui.available_width();
+        ui.set_min_width(width);
+        let stacked = width < 400.0;
+        let data_width = if stacked { width } else { width - 113.0 };
+        let (row, _) = ui.allocate_exact_size(egui::vec2(width, 44.0), egui::Sense::hover());
+        let first_width = (data_width - 12.0) * 0.51;
+        let column = |ui: &mut egui::Ui, x, width| {
+            ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(
+                        row.min + egui::vec2(x, 0.0),
+                        egui::vec2(width, row.height()),
+                    ))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            )
+        };
+        let mut recipient = column(ui, 0.0, first_width);
+        recipient
+            .add(egui::Label::new(egui::RichText::new(name).strong()).truncate())
+            .on_hover_text(&entry.user);
+        egui::Frame::new()
+            .fill(rgb(fill))
+            .corner_radius(12)
+            .inner_margin(egui::Margin::symmetric(8, 3))
+            .show(&mut recipient, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(status).size(11.0).color(rgb(color)))
+                        .truncate(),
+                )
+                .on_hover_text(status);
+            });
+        let mut connection = column(ui, first_width + 12.0, data_width - first_width - 12.0);
+        connection.add(
+            egui::Label::new(
+                egui::RichText::new("Последнее подключение")
+                    .size(11.0)
+                    .color(MUTED),
+            )
+            .truncate(),
+        );
+        connection
+            .add(egui::Label::new(last).truncate())
+            .on_hover_text(last);
+        if revocable {
+            let draw_action = |ui: &mut egui::Ui| {
+                ui.with_layout(
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+
+                    |ui| {
+                        ui.add_sized(
+                            egui::vec2(102.0, 36.0),
+                            egui::Button::new(egui::RichText::new("Отозвать").color(ERROR))
+                                .corner_radius(18)
+                                .stroke(egui::Stroke::new(
+                                    1.0_f32,
+                                    egui::Color32::from_rgb(73, 58, 78),
+                                )),
+                        )
+                    },
+                )
+                    .inner
+            };
+            let clicked = if stacked {
+                ui.add_space(5.0);
+                draw_action(ui).clicked()
+            } else {
+                let mut button = column(ui, width - 102.0, 102.0);
+                button.add_space(4.0);
+                draw_action(&mut button).clicked()
+            };
+            if clicked {
+                action = AccessAction::Ask;
+            }
+        }
+        if confirming {
+            ui.add_space(8.0);
+            ui.label("Закрыть доступ этому пользователю?");
+            ui.horizontal_wrapped(|ui| {
+                if pill(ui, "Подтвердить отзыв", 170.0, false).clicked() {
+                    action = AccessAction::Confirm;
+                }
+                if pill(ui, "Отмена", 90.0, false).clicked() {
+                    action = AccessAction::Cancel;
+                }
+            });
+        }
+    });
+    action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_rows_keep_compact_height_and_content_sized_badges() {
+        let ctx = egui::Context::default();
+        let mut entry = invites::AccessEntry {
+            user: "stv_0123456789abcdef".into(),
+            name: "Даня".into(),
+            state: invites::AccessState::Active,
+            last_connected: None,
+        };
+        let frame = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(680.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| {
+                        let first = ui.cursor().top();
+                        access_row(ui, &entry, false);
+                        let second = ui.cursor().top();
+                        entry.state = invites::AccessState::Expired;
+                        access_row(ui, &entry, false);
+                        let third = ui.cursor().top();
+                        assert!((60.0..80.0).contains(&(second - first)));
+                        assert!(((second - first) - (third - second)).abs() < 1.0);
+                    })
+                    .inner
+            },
+        );
+        let badge = frame
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == egui::Color32::from_rgb(32, 59, 53) => {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("active status badge");
+        assert!((40.0..140.0).contains(&badge.width()), "{badge:?}");
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     Share,
@@ -163,70 +331,19 @@ impl InviteUi {
                         if entries.is_empty() {
                             ui.label("Приглашений пока нет.");
                         }
-                        for entry in entries {
-                            let (status, revocable) = match entry.state {
-                                invites::AccessState::Active => ("Активировано", true),
-                                invites::AccessState::Pending => ("Ожидает активации", true),
-                                invites::AccessState::Expired => ("Срок истёк", false),
-                                invites::AccessState::Revoked => ("Доступ отозван", false),
-                            };
-                            crate::ui::surface(crate::ui::BACKGROUND, 14, 11).show(ui, |ui| {
-                                let width = ui.available_width();
-                                ui.set_min_width(width);
-                                ui.columns(3, |columns| {
-                                    let name = if entry.name.is_empty() {
-                                        &entry.user
-                                    } else {
-                                        &entry.name
-                                    };
-                                    columns[0]
-                                        .add(
-                                            egui::Label::new(egui::RichText::new(name).strong())
-                                                .truncate(),
-                                        )
-                                        .on_hover_text(&entry.user);
-                                    crate::ui::badge(
-                                        &mut columns[0],
-                                        status,
-                                        matches!(entry.state, invites::AccessState::Active),
-                                    );
-                                    columns[1].label(
-                                        egui::RichText::new("Последнее подключение")
-                                            .small()
-                                            .color(crate::ui::MUTED),
-                                    );
-                                    columns[1].label(
-                                        entry
-                                            .last_connected
-                                            .as_deref()
-                                            .unwrap_or("Нет записи в журнале"),
-                                    );
-                                    columns[2].with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if revocable
-                                                && ui
-                                                    .button(
-                                                        egui::RichText::new("Отозвать")
-                                                            .color(crate::ui::ERROR),
-                                                    )
-                                                    .clicked()
-                                            {
-                                                self.revoke_user = Some(entry.user.clone());
-                                            }
-                                        },
-                                    );
-                                });
-                                if self.revoke_user.as_deref() == Some(&entry.user) {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label("Закрыть доступ этому пользователю?");
-                                        revoke = ui.button("Подтвердить отзыв").clicked();
-                                        if ui.button("Отмена").clicked() {
-                                            self.revoke_user = None;
-                                        }
-                                    });
-                                }
-                            });
+                        for (index, entry) in entries.iter().enumerate() {
+                            if index > 0 {
+                                ui.add_space(5.0);
+                            }
+                            let confirming =
+                                self.revoke_user.as_deref() == Some(entry.user.as_str());
+                            let action = access_row(ui, entry, confirming);
+                            match action {
+                                AccessAction::Ask => self.revoke_user = Some(entry.user.clone()),
+                                AccessAction::Cancel => self.revoke_user = None,
+                                AccessAction::Confirm => revoke = true,
+                                AccessAction::None => {}
+                            }
                         }
                     }
                     None => {
