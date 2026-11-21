@@ -41,7 +41,18 @@ fn download_script(path: &std::path::Path, current: &str) -> String {
         r#"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $headers = @{{ 'User-Agent' = 'SSH-Tunnel'; Accept = 'application/vnd.github+json' }}
-        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/d1llr/sshvpn/releases/latest' -Headers $headers -TimeoutSec 20
+        $api = 'https://api.github.com/repos/d1llr/sshvpn'
+        $token = $env:SSH_TUNNEL_GITHUB_TOKEN
+        if ($token) {{ $headers.Authorization = 'Bearer ' + $token.Trim() }}
+        try {{
+            $release = Invoke-RestMethod -Uri "$api/releases/latest" -Headers $headers -TimeoutSec 20
+        }} catch {{
+            $status = [int]$_.Exception.Response.StatusCode
+            if ($status -eq 404 -or $status -eq 401) {{
+                throw 'Нет доступа к релизам GitHub. Для закрытого репозитория настройте SSH_TUNNEL_GITHUB_TOKEN с доступом Contents: read к d1llr/sshvpn.'
+            }}
+            throw
+        }}
         if ($release.draft -or $release.prerelease -or $release.tag_name -cnotmatch '^v(\d+\.\d+\.\d+)$') {{
             throw 'Unexpected GitHub release version.'
         }}
@@ -55,7 +66,13 @@ fn download_script(path: &std::path::Path, current: &str) -> String {
             throw 'The release is missing a verifiable Windows installer.'
         }}
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile '{path}' -TimeoutSec 180
+        if ($token) {{
+            if ([string]$asset.id -cnotmatch '^[1-9][0-9]*$') {{ throw 'Invalid release asset ID.' }}
+            $headers.Accept = 'application/octet-stream'
+            Invoke-WebRequest -UseBasicParsing -Uri "$api/releases/assets/$($asset.id)" -Headers $headers -OutFile '{path}' -TimeoutSec 180
+        }} else {{
+            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile '{path}' -TimeoutSec 180
+        }}
         $file = Get-Item -LiteralPath '{path}'
         $hasher = [Security.Cryptography.SHA256]::Create()
         $fileStream = [IO.File]::OpenRead('{path}')
@@ -94,6 +111,7 @@ mod tests {
                     tag_name = 'v0.3.0'
                     assets = @(@{
                         name = 'ssh-tunnel-setup-x64.exe'
+                        id = 1234
                         state = 'uploaded'
                         browser_download_url = 'https://github.com/d1llr/sshvpn/releases/download/v0.3.0/ssh-tunnel-setup-x64.exe'
                         digest = 'sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
@@ -102,11 +120,21 @@ mod tests {
                 }
             }
             function Invoke-WebRequest {
-                param([switch]$UseBasicParsing, $Uri, $OutFile, $TimeoutSec)
+                param([switch]$UseBasicParsing, $Uri, $OutFile, $TimeoutSec, $Headers)
+                if ($env:SSH_TUNNEL_GITHUB_TOKEN) {
+                    if ($Uri -ne 'https://api.github.com/repos/d1llr/sshvpn/releases/assets/1234' -or
+                        $Headers.Authorization -ne 'Bearer test-token' -or
+                        $Headers.Accept -ne 'application/octet-stream') { throw 'Invalid private download request.' }
+                }
                 [IO.File]::WriteAllText($OutFile, 'hello')
             }
         "#;
-        let script = |current| format!("{mock}\n{}", download_script(&target, current));
+        let script = |current| {
+            format!(
+                "$env:SSH_TUNNEL_GITHUB_TOKEN = 'test-token'\n{mock}\n{}",
+                download_script(&target, current)
+            )
+        };
         assert!(crate::vpn::powershell(&script("0.3.0"))
             .unwrap()
             .trim()

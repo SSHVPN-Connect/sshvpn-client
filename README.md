@@ -42,6 +42,12 @@ SHA-256 установщика, запустит обновление и зак�
 откроет приложение после обновления. Профили хранятся отдельно в
 `%LOCALAPPDATA%` и сохраняются при обновлении.
 
+Для закрытого репозитория добавь пользовательскую переменную Windows
+`SSH_TUNNEL_GITHUB_TOKEN` с fine-grained токеном GitHub, ограниченным
+репозиторием `d1llr/sshvpn` и разрешением **Contents: Read-only**.
+Перезапусти клиент после настройки переменной. Каждый пользователь
+закрытых релизов должен иметь собственный доступ к репозиторию.
+
 ### Сборка из исходников
 
 Установи [Rust и Cargo](https://rustup.rs/) и включи компонент
@@ -64,8 +70,8 @@ cargo +stable-x86_64-pc-windows-gnu build --release --locked
 
 Чтобы собрать установщик, установи [Inno Setup](https://jrsoftware.org/inno-setup/downloads),
 положи `ssh-tunnel.exe`, `wintun.dll` и `WINTUN-LICENSE.txt` в папку сборки
-и вызови `ISCC.exe /DAppVersion=0.2.0 /DPayloadDir=ПОЛНЫЙ_ПУТЬ installer\ssh-tunnel.iss`.
-Версия должна совпадать с `Cargo.toml`, а тег релиза — иметь вид `v0.2.0`.
+и вызови `ISCC.exe /DAppVersion=0.2.1 /DPayloadDir=ПОЛНЫЙ_ПУТЬ installer\ssh-tunnel.iss`.
+Версия должна совпадать с `Cargo.toml`, а тег релиза — иметь вид `v0.2.1`.
 
 ## 3. Подключиться
 
