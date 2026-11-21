@@ -98,6 +98,7 @@ impl Assets {
 pub struct Desktop {
     client: Client,
     assets: Assets,
+    running_apps: crate::running_apps::Picker,
     closing: bool,
     update: Option<JoinHandle<Result<Option<std::path::PathBuf>, String>>>,
 }
@@ -112,6 +113,7 @@ impl Desktop {
         Ok(Self {
             client,
             assets: Assets::load(ctx)?,
+            running_apps: crate::running_apps::Picker::default(),
             closing: false,
             update: None,
         })
@@ -561,10 +563,11 @@ impl Desktop {
                                 });
                             }
                             if let Some(index) = remove { routing.applications.remove(index); }
-                            if ui.button("Добавить приложение (.exe)").clicked() {
+                            self.running_apps.show(ui, &mut routing.applications);
+                            if ui.button("Выбрать файл (.exe)").clicked() {
                                 match select_application() {
-                                    Ok(Some(path)) if !routing.applications.contains(&path) => routing.applications.push(path),
-                                    Ok(_) => {}
+                                    Ok(Some(path)) => crate::running_apps::add_unique(&mut routing.applications, path),
+                                    Ok(None) => {}
                                     Err(error) => self.client.notice = Some((error, true)),
                                 }
                             }

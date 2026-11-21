@@ -8,6 +8,7 @@ mod askpass;
 mod credentials;
 mod elevation;
 mod profiles;
+mod running_apps;
 mod tunnel;
 mod ui;
 mod updater;

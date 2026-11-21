@@ -1993,8 +1993,10 @@ dependencies = [
 name = "ssh-tunnel"
 version = "0.3.0"
 dependencies = [
+ "base64",
  "eframe",
  "getrandom",
+ "image",
  "resvg",
  "serde",
  "serde_json",
