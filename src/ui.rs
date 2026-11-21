@@ -205,7 +205,11 @@ impl Desktop {
                     }
                 });
             ui.add_space(15.0);
-            ui.label(RichText::new("SSH · порт 22").size(12.0).color(MUTED));
+            ui.label(
+                RichText::new(concat!("Версия ", env!("CARGO_PKG_VERSION")))
+                    .size(12.0)
+                    .color(MUTED),
+            );
             ui.add_space(5.0);
             let update_label = if self.update.is_some() {
                 "Проверяю обновления…"
@@ -392,6 +396,10 @@ impl Desktop {
             ui.set_min_height(78.0);
             ui.columns(3, |columns| {
                 let mode = match mode {
+                    Mode::SystemVpn if self.client.draft.ipv4_routing.by_application => {
+                        "По приложениям"
+                    }
+                    Mode::SystemVpn if self.client.draft.ipv4_routing.split => "IPv4 · по CIDR",
                     Mode::SystemVpn => "Системный IPv4",
                     Mode::Socks5 => endpoint.as_deref().unwrap_or("SOCKS5"),
                 };
@@ -525,7 +533,56 @@ impl Desktop {
                             false,
                         );
                     }
-                    if profile.mode == Mode::Socks5 {
+                    if profile.mode == Mode::SystemVpn {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Маршрутизация IPv4").color(MUTED));
+                        let routing = &mut profile.ipv4_routing;
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.selectable_label(!routing.split && !routing.by_application, "Весь трафик").clicked() {
+                                routing.split = false;
+                                routing.by_application = false;
+                            }
+                            if ui.selectable_label(routing.split && !routing.by_application, "Список CIDR").clicked() {
+                                routing.split = true;
+                                routing.by_application = false;
+                            }
+                            if ui.selectable_label(routing.by_application, "По приложениям").clicked() {
+                                routing.split = false;
+                                routing.by_application = true;
+                            }
+                        });
+                        if routing.by_application {
+                            let mut remove = None;
+                            for (index, path) in routing.applications.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Удалить").clicked() { remove = Some(index); }
+                                    ui.add(egui::Label::new(path.file_name().unwrap_or(path.as_os_str()).to_string_lossy())
+                                        .truncate()).on_hover_text(path.display().to_string());
+                                });
+                            }
+                            if let Some(index) = remove { routing.applications.remove(index); }
+                            if ui.button("Добавить приложение (.exe)").clicked() {
+                                match select_application() {
+                                    Ok(Some(path)) if !routing.applications.contains(&path) => routing.applications.push(path),
+                                    Ok(_) => {}
+                                    Err(error) => self.client.notice = Some((error, true)),
+                                }
+                            }
+                            ui.label(RichText::new("Новые TCP-соединения выбранных приложений идут через SSH. UDP выбранных приложений блокируется.").size(12.0).color(MUTED));
+                        } else if routing.split {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut profile.ipv4_routing.cidrs)
+                                    .hint_text("192.0.2.0/24\n198.51.100.10/32")
+                                    .desired_rows(3)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.label(
+                                RichText::new("Через VPN идут только указанные диапазоны IPv4.")
+                                    .size(12.0)
+                                    .color(MUTED),
+                            );
+                        }
+                    } else {
                         field(
                             ui,
                             "Локальный порт SOCKS5",
@@ -572,6 +629,37 @@ impl Desktop {
         if result.inner || result.should_close() {
             self.client.load_selection();
             self.client.editing = false;
+        }
+    }
+}
+
+fn select_application() -> Result<Option<std::path::PathBuf>, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::UI::Controls::Dialogs::*;
+    let filter: Vec<u16> = "Приложения (*.exe)\0*.exe\0\0".encode_utf16().collect();
+    let title: Vec<u16> = "Выбрать приложение\0".encode_utf16().collect();
+    let mut path = vec![0_u16; 32768];
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: filter.as_ptr(),
+        lpstrTitle: title.as_ptr(),
+        lpstrFile: path.as_mut_ptr(),
+        nMaxFile: path.len() as u32,
+        Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if unsafe { GetOpenFileNameW(&mut dialog) } != 0 {
+        let end = path
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(path.len());
+        Ok(Some(std::ffi::OsString::from_wide(&path[..end]).into()))
+    } else {
+        let code = unsafe { CommDlgExtendedError() };
+        if code == 0 {
+            Ok(None)
+        } else {
+            Err(format!("Не удалось открыть выбор приложения ({code:#x})."))
         }
     }
 }

@@ -3,6 +3,7 @@
 use eframe::egui;
 use std::thread::{self, JoinHandle};
 
+mod app_tunnel;
 mod askpass;
 mod credentials;
 mod elevation;
@@ -18,6 +19,7 @@ use vpn::Vpn;
 enum Connection {
     Socks(Tunnel),
     Vpn(Vpn),
+    Apps(app_tunnel::AppTunnel),
 }
 
 impl Connection {
@@ -25,6 +27,7 @@ impl Connection {
         match self {
             Self::Socks(tunnel) => tunnel.poll(),
             Self::Vpn(vpn) => vpn.poll(),
+            Self::Apps(tunnel) => tunnel.poll(),
         }
     }
 
@@ -32,6 +35,7 @@ impl Connection {
         match self {
             Self::Socks(tunnel) => tunnel.is_ready(),
             Self::Vpn(vpn) => vpn.is_ready(),
+            Self::Apps(tunnel) => tunnel.is_ready(),
         }
     }
 
@@ -39,6 +43,7 @@ impl Connection {
         match self {
             Self::Socks(tunnel) => tunnel.stop(),
             Self::Vpn(vpn) => vpn.stop(),
+            Self::Apps(tunnel) => tunnel.stop(),
         }
     }
 }
@@ -132,6 +137,13 @@ impl Client {
             connection.key.clear();
         }
         connection.validate()?;
+        if profile.mode == Mode::SystemVpn {
+            if profile.ipv4_routing.by_application {
+                profile.ipv4_routing.application_paths()?;
+            } else {
+                profile.ipv4_routing.routes()?;
+            }
+        }
         profile.name = profile.name.trim().to_owned();
         if let Some(saved) = self
             .profiles
@@ -320,9 +332,20 @@ impl Client {
     fn start_connection(&mut self, profile: SavedProfile, secret: String) -> Result<(), String> {
         let password_auth = profile.authentication == Authentication::Password;
         self.tunnel = Some(match profile.mode {
-            Mode::SystemVpn => {
-                Connection::Vpn(Vpn::start(profile.connection, password_auth, secret)?)
+            Mode::SystemVpn if profile.ipv4_routing.by_application => {
+                Connection::Apps(app_tunnel::AppTunnel::start(
+                    &profile.connection,
+                    password_auth,
+                    secret,
+                    profile.ipv4_routing.application_paths()?,
+                )?)
             }
+            Mode::SystemVpn => Connection::Vpn(Vpn::start(
+                profile.connection,
+                password_auth,
+                secret,
+                profile.ipv4_routing.routes()?,
+            )?),
             Mode::Socks5 => {
                 Connection::Socks(Tunnel::start(&profile.connection, password_auth, secret)?)
             }

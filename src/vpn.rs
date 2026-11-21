@@ -1,3 +1,4 @@
+use crate::profiles::Ipv4Prefix;
 use crate::tunnel::{ssh_command, ssh_error, system_program, Profile};
 use std::env;
 use std::io::{self, BufReader, Read, Write};
@@ -65,7 +66,12 @@ pub struct Vpn {
 }
 
 impl Vpn {
-    pub fn start(profile: Profile, password_auth: bool, password: String) -> Result<Self, String> {
+    pub fn start(
+        profile: Profile,
+        password_auth: bool,
+        password: String,
+        split: Option<Vec<Ipv4Prefix>>,
+    ) -> Result<Self, String> {
         let dll = env::current_exe()
             .map_err(|e| e.to_string())?
             .with_file_name("wintun.dll");
@@ -97,6 +103,9 @@ impl Vpn {
                             _ => None,
                         })
                         .ok_or("System VPN requires an IPv4 SSH endpoint.")?;
+                    if split.as_ref().is_some_and(|routes| routes.iter().any(|route| route.is_host() && route.contains(ip))) {
+                        return Err("Удалите адрес SSH-сервера /32 из CIDR-списка: соединение с сервером должно идти напрямую.".into());
+                    }
                     // Use an absolute path beside the executable for the signed Wintun binary.
                     let driver =
                         unsafe { wintun::load_from_path(dll) }.map_err(|e| e.to_string())?;
@@ -163,7 +172,7 @@ impl Vpn {
                             .map_err(|e| e.to_string())?,
                     );
                     let mut routes = Routes::new(index, ip);
-                    routes.apply()?;
+                    routes.apply(split.as_deref())?;
                     tx.send(Ok(Status::Ready)).map_err(|e| e.to_string())?;
                     let result = forward(&session, stdin, frames_rx);
                     let cleanup = routes.remove();
@@ -354,8 +363,7 @@ impl Routes {
         }
     }
 
-    fn apply(&mut self) -> Result<(), String> {
-        let index = self.index;
+    fn ensure_bypass(&mut self) -> Result<(), String> {
         let server = self.server;
         let route = powershell(&format!(
             "$r = Find-NetRoute -RemoteIPAddress '{server}' | Where-Object {{ $_.DestinationPrefix }} | Select-Object -First 1; if (!$r) {{ throw 'No physical route to SSH server' }}; [Console]::WriteLine(('{{0}} {{1}}' -f $r.InterfaceIndex,$r.NextHop))"
@@ -376,17 +384,35 @@ impl Routes {
         if added.trim() == "added" {
             self.bypass = Some((physical, hop, metric));
         }
-        powershell(&format!(
+        Ok(())
+    }
+
+    fn apply(&mut self, split: Option<&[Ipv4Prefix]>) -> Result<(), String> {
+        let index = self.index;
+        if split.is_none_or(|routes| routes.iter().any(|route| route.contains(self.server))) {
+            self.ensure_bypass()?;
+        }
+        let mut script = format!(
             r"
             New-NetIPAddress -InterfaceIndex {index} -IPAddress 172.31.255.2 -PrefixLength 30 -PolicyStore ActiveStore | Out-Null;
             Set-NetIPInterface -InterfaceIndex {index} -AddressFamily IPv4 -NlMtuBytes {MTU} -InterfaceMetric 4 -PolicyStore ActiveStore;
+            "
+        );
+        if let Some(prefixes) = split {
+            use std::fmt::Write as _;
+            for prefix in prefixes {
+                writeln!(script, "New-NetRoute -InterfaceIndex {index} -DestinationPrefix '{prefix}' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;").expect("format into String");
+            }
+        } else {
+            script.push_str(&format!(r"
             Set-DnsClientServerAddress -InterfaceIndex {index} -ServerAddresses @('1.1.1.1','1.0.0.1');
             New-NetRoute -InterfaceIndex {index} -DestinationPrefix '0.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;
             New-NetRoute -InterfaceIndex {index} -DestinationPrefix '128.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;
             New-NetIPAddress -InterfaceIndex {index} -IPAddress 'fd53:5353:4856::2' -PrefixLength 64 -PolicyStore ActiveStore | Out-Null;
             New-NetRoute -InterfaceIndex {index} -DestinationPrefix '2000::/3' -NextHop '::' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;
-        "
-        ))?;
+            "));
+        }
+        powershell(&script)?;
         Ok(())
     }
 

@@ -78,6 +78,15 @@ pub struct Tunnel {
 
 impl Tunnel {
     pub fn start(profile: &Profile, password_auth: bool, secret: String) -> Result<Self, String> {
+        Self::start_to(profile, password_auth, secret, None)
+    }
+
+    pub fn start_to(
+        profile: &Profile,
+        password_auth: bool,
+        secret: String,
+        address: Option<Ipv4Addr>,
+    ) -> Result<Self, String> {
         let netstat = system_program("netstat.exe")?;
         let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, profile.socks_port);
         drop(
@@ -90,8 +99,18 @@ impl Tunnel {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .args(["-N", "-o", "ExitOnForwardFailure=yes", "-D"])
-            .arg(endpoint.to_string())
-            .args(["--", &profile.server]);
+            .arg(endpoint.to_string());
+        if let Some(address) = address {
+            command.args([
+                "-4",
+                "-o",
+                &format!("HostKeyAlias={}", profile.server),
+                "--",
+                &address.to_string(),
+            ]);
+        } else {
+            command.args(["--", &profile.server]);
+        }
         let process = command
             .spawn()
             .map_err(|error| format!("Could not launch OpenSSH: {error}"))?;

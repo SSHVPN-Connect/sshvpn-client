@@ -1,0 +1,8 @@
+The per-application routing helper is the unmodified sing-box v1.14.4
+Windows amd64 distribution by SagerNet.
+
+Upstream release and equivalent access to corresponding source:
+https://github.com/SagerNet/sing-box/releases/tag/v1.14.4
+https://github.com/SagerNet/sing-box/archive/refs/tags/v1.14.4.tar.gz
+
+Upstream license: SING-BOX-LICENSE.txt.

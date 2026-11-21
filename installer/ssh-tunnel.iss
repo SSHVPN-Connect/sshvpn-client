@@ -37,9 +37,14 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Source: "{#PayloadDir}\ssh-tunnel.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\wintun.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\WINTUN-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\sing-box.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#PayloadDir}\libcronet.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#PayloadDir}\SING-BOX-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "sing-box-source.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{commonprograms}\SSH Tunnel"; Filename: "{app}\ssh-tunnel.exe"; WorkingDir: "{app}"
+Name: "{commondesktop}\SSH Tunnel"; Filename: "{app}\ssh-tunnel.exe"; WorkingDir: "{app}"
 
 [Run]
 Filename: "{app}\ssh-tunnel.exe"; Description: "{cm:LaunchProgram,SSH Tunnel}"; Flags: nowait postinstall skipifsilent
