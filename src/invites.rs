@@ -20,7 +20,7 @@ use std::{
 
 const VERSION: &str = "ssh-tunnel-invite-1";
 const HANDLER: &str = "/usr/local/libexec/ssh-tunnel-invite";
-const LIST_COMMAND: &str = "/usr/local/libexec/ssh-tunnel-invite list-v2";
+const LIST_COMMAND: &str = "/usr/local/libexec/ssh-tunnel-invite list-v4";
 pub(crate) const INSTALLER: &str = include_str!("../install-invitations.sh");
 pub(crate) const UPDATE_REQUIRED: &str =
     "На сервере установлена старая версия поддержки приглашений. Нажмите «Обновить сервер».";
@@ -37,25 +37,19 @@ struct Ticket {
 struct Issued {
     user: String,
     host_key: String,
-    expires: String,
 }
 
-pub struct Invitation {
-    pub encoded: String,
-    pub code: String,
-    pub user: String,
-    pub expires: String,
-}
-
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct AccessEntry {
     pub user: String,
     pub name: String,
     pub state: AccessState,
     pub last_connected: Option<String>,
+    #[serde(default)]
+    pub can_restore: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessState {
     Pending,
@@ -248,7 +242,7 @@ fn exchange<T: DeserializeOwned>(
     serde_json::from_slice(&data).map_err(|_| "Сервер вернул неверный ответ приглашения.".into())
 }
 
-pub fn issue(profile: SavedProfile, secret: String, name: String) -> Result<Invitation, String> {
+pub fn issue(profile: SavedProfile, secret: String, name: String) -> Result<String, String> {
     if profile.connection.user != "root" {
         return Err("Для выдачи приглашений нужен профиль SSH с пользователем root.".into());
     }
@@ -273,16 +267,28 @@ pub fn issue(profile: SavedProfile, secret: String, name: String) -> Result<Invi
         temporary_key,
     };
     let (encoded, code) = seal(&ticket)?;
-    Ok(Invitation {
-        encoded,
-        code,
-        user: ticket.user,
-        expires: issued.expires,
-    })
+    Ok(format!("{encoded}:{code}"))
+}
+
+pub fn needs_legacy_code(encoded: &str) -> bool {
+    matches!(encoded.trim().split_once(':'), Some((VERSION, payload))
+        if !payload.is_empty() && !payload.contains(':'))
+}
+
+fn open_invitation(encoded: &str, legacy_code: &str) -> Result<Ticket, String> {
+    let encoded = encoded.trim();
+    let (ticket, code) = if needs_legacy_code(encoded) {
+        (encoded, legacy_code)
+    } else {
+        encoded
+            .rsplit_once(':')
+            .ok_or("Неверная строка приглашения.")?
+    };
+    open_ticket(ticket, code)
 }
 
 pub fn redeem(encoded: &str, code: &str, base: &Path) -> Result<Imported, String> {
-    let ticket = open_ticket(encoded, code)?;
+    let ticket = open_invitation(encoded, code)?;
     if !valid_user(&ticket.user)
         || !valid_public_key(&ticket.host_key)
         || !ticket
@@ -335,19 +341,38 @@ pub fn redeem(encoded: &str, code: &str, base: &Path) -> Result<Imported, String
     })
 }
 
-pub fn revoke(profile: SavedProfile, secret: String, user: String) -> Result<(), String> {
+#[derive(Clone, Copy)]
+pub enum AccessChange {
+    Revoke,
+    RemoveExpired,
+    RemoveRevoked,
+    Restore,
+}
+
+pub fn change_access(
+    profile: &SavedProfile,
+    secret: String,
+    user: String,
+    change: AccessChange,
+) -> Result<(), String> {
     if profile.connection.user != "root" || !valid_user(&user) {
         return Err("Выберите профиль root и укажите SSH-пользователя из приглашения.".into());
     }
+    let (command, acknowledgement) = match change {
+        AccessChange::Revoke => ("revoke", "revoked"),
+        AccessChange::RemoveExpired => ("remove-expired", "revoked"),
+        AccessChange::RemoveRevoked => ("remove-revoked", "revoked"),
+        AccessChange::Restore => ("restore", "restored"),
+    };
     let response: Value = request(
         &profile.connection,
         profile.authentication == Authentication::Password,
         secret,
-        "revoke",
+        command,
         json!({ "user": user }),
     )?;
-    if response["revoked"] != true {
-        return Err("Сервер не подтвердил отзыв доступа.".into());
+    if response[acknowledgement] != true {
+        return Err("Сервер не подтвердил изменение доступа.".into());
     }
     Ok(())
 }
@@ -366,7 +391,7 @@ pub fn list(profile: &SavedProfile, secret: String) -> Result<Vec<AccessEntry>, 
     )
     .map_err(|error| {
         if error.lines().any(|line| {
-            line.trim() == "SSH Tunnel invitations: 'list-v2'"
+            line.trim() == "SSH Tunnel invitations: 'list-v4'"
                 || (line.contains(HANDLER) && line.contains("No such file or directory"))
         }) {
             UPDATE_REQUIRED.to_owned()
@@ -413,7 +438,7 @@ exec {LIST_COMMAND}"#
 mod tests {
     use super::*;
     #[test]
-    fn invitation_requires_separate_authenticated_code() {
+    fn invitation_accepts_combined_and_legacy_formats() {
         let ticket = Ticket {
             server: "host.example".into(),
             user: "stv_0123456789abcdef".into(),
@@ -423,9 +448,21 @@ mod tests {
         let (encrypted, code) = seal(&ticket).unwrap();
         assert!(!encrypted.contains("host.example") && !encrypted.contains(&code));
         assert_eq!(
-            open_ticket(&encrypted, &code).unwrap().temporary_key,
+            open_invitation(&encrypted, &code).unwrap().temporary_key,
             "temporary"
         );
-        assert!(open_ticket(&encrypted, &URL_SAFE_NO_PAD.encode([0; 32])).is_err());
+        let combined = format!("{encrypted}:{code}");
+        assert!(needs_legacy_code(&encrypted));
+        assert!(!needs_legacy_code(&combined));
+        assert_eq!(
+            open_invitation(&combined, "").unwrap().temporary_key,
+            ticket.temporary_key
+        );
+        assert!(open_invitation(&encrypted, "").is_err());
+        assert!(open_invitation(
+            &format!("{encrypted}:{}", URL_SAFE_NO_PAD.encode([0; 32])),
+            ""
+        )
+        .is_err());
     }
 }

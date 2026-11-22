@@ -1,3 +1,9 @@
 /target/
 /.rust-build/
 /.idea/
+
+/diagrams/
+
+# Windows Explorer metadata
+Thumbs.db
+Desktop.ini

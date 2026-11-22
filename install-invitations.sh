@@ -111,39 +111,75 @@ def list_access(_data):
                 continue
             state, key = invitation_state(user, record)
         entry = {"user": user, "name": record.get("name", ""), "state": state,
-                 "last_connected": None}
+                 "last_connected": None,
+                 "can_restore": state == "revoked" and bool(record.get("public_key"))}
         entries.append(entry)
         if key:
             fingerprints[user, key] = entry
     if not fingerprints:
         return entries
-    pattern = r"^Accepted publickey for (stv_[0-9a-f]{16}) from .* (SHA256:[A-Za-z0-9+/]+)$"
+    pattern = r"Accepted publickey for (stv_[0-9a-f]{16}) from .* (SHA256:[A-Za-z0-9+/]+)(?=\s|$)"
+    def record_login(match, timestamp):
+        if not match:
+            return
+        entry = fingerprints.get(match.groups())
+        if entry is None:
+            return
+        value = timestamp.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if not entry["last_connected"] or value > entry["last_connected"]:
+            entry["last_connected"] = value
+
     try:
         output = subprocess.run(
             ["journalctl", "--quiet", "--no-pager", "--reverse", "--output=json",
-             "--lines=4096", "--output-fields=MESSAGE", "--identifier=sshd",
-             "--identifier=sshd-session", "--grep", pattern, "_UID=0"],
+             "--lines=4096", "--output-fields=MESSAGE,_UID,_EXE,_SYSTEMD_UNIT", "--identifier=sshd",
+             "--identifier=sshd-session", "--grep", "^" + pattern],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=6,
         ).stdout
     except subprocess.TimeoutExpired as error:
         output = error.stdout or b""
     except OSError:
-        return entries
+        output = b""
     for line in output.splitlines():
         try:
             event = json.loads(line)
-            match = re.fullmatch(pattern, event.get("MESSAGE", ""))
-            if not match or match.groups() not in fingerprints:
+            if (event.get("_UID") != "0"
+                    and event.get("_SYSTEMD_UNIT") not in ("ssh.service", "sshd.service")
+                    and event.get("_EXE") not in ("/usr/sbin/sshd", "/usr/lib/openssh/sshd-session")):
                 continue
+            match = re.match(pattern, event.get("MESSAGE", ""))
             seconds = int(event["__REALTIME_TIMESTAMP"]) // 1_000_000
-            last_connected = datetime.datetime.fromtimestamp(
-                seconds, datetime.timezone.utc
-            ).strftime("%Y-%m-%d %H:%M:%S UTC")
+            record_login(match, datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc))
         except (ValueError, TypeError, KeyError, OverflowError, OSError):
             continue
-        fingerprints.pop(match.groups())["last_connected"] = last_connected
-        if not fingerprints:
-            break
+    for path in (Path("/var/log/auth.log"), Path("/var/log/auth.log.1")):
+        try:
+            with path.open("rb") as log:
+                size = log.seek(0, os.SEEK_END)
+                log.seek(max(0, size - 2_000_000))
+                if log.tell():
+                    log.readline()
+                lines = log.read(2_000_000).decode(errors="replace").splitlines()
+        except OSError:
+            continue
+        now = datetime.datetime.now().astimezone()
+        for line in reversed(lines):
+            match = re.search(r"\bsshd(?:-session)?\[\d+\]: " + pattern, line)
+            if not match or match.groups() not in fingerprints:
+                continue
+            try:
+                stamp = line.split(maxsplit=1)[0]
+                try:
+                    timestamp = datetime.datetime.fromisoformat(stamp)
+                except ValueError:
+                    timestamp = datetime.datetime.strptime(
+                        f"{now.year} {line[:15]}", "%Y %b %d %H:%M:%S"
+                    )
+                    if timestamp > now.replace(tzinfo=None):
+                        timestamp = timestamp.replace(year=now.year - 1)
+                record_login(match, timestamp)
+            except (ValueError, OverflowError, OSError):
+                continue
     return entries
 
 
@@ -154,6 +190,13 @@ def request():
     return json.loads(data)
 
 
+def create_account(user):
+    # Random crypt-shaped password hash with no known password. SSH disables passwords for this group.
+    password = "$6$" + secrets.token_hex(8) + "$" + ".".join([secrets.token_hex(42), "a"])
+    subprocess.run(["useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent",
+                    "--gid", "ssh-tunnel-share", "--shell", "/bin/sh", "--password", password, user], check=True)
+
+
 def issue(data):
     key = public_key(data["public_key"])
     name = data.get("name", "").strip()
@@ -162,10 +205,7 @@ def issue(data):
     host = public_key(" ".join(Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text().split()[:2]))
     user = "stv_" + secrets.token_hex(8)
     expiry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)).strftime("%Y%m%d%H%M%SZ")
-    # Random crypt-shaped password hash with no known password. SSH disables passwords for this group.
-    password = "$6$" + secrets.token_hex(8) + "$" + ".".join([secrets.token_hex(42), "a"])
-    subprocess.run(["useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent",
-                    "--gid", "ssh-tunnel-share", "--shell", "/bin/sh", "--password", password, user], check=True)
+    create_account(user)
     try:
         with (STATE / user).open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -214,20 +254,70 @@ def upgrade():
                 write_session_key(path.name, public_key(saved[len(LEGACY_KEY):]))
 
 
+def delete_account(user):
+    result = subprocess.run(["id", "-gn", user], capture_output=True, text=True)
+    if result.returncode == 0:
+        if result.stdout.strip() != "ssh-tunnel-share":
+            raise ValueError("Account does not belong to the invitation group.")
+        subprocess.run(["pkill", "-KILL", "-u", user], check=False)
+        subprocess.run(["userdel", user], check=True)
+
+
 def revoke(data):
+    return remove_access(data)
+
+
+def remove_expired(data):
+    return remove_access(data, expected="expired")
+
+
+def remove_revoked(data):
+    return remove_access(data, expected="revoked")
+
+
+def remove_access(data, expected=None):
     user = account(data["user"])
     with (STATE / user).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         record = read_record(user)
-        if (KEYS / user).exists():
-            _state, key = invitation_state(user, record)
-            save_record(user, {**record, "fingerprint": key})
-        (KEYS / user).unlink(missing_ok=True)
-        result = subprocess.run(["id", "-gn", user], capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip() == "ssh-tunnel-share":
-            subprocess.run(["pkill", "-KILL", "-u", user], check=False)
-            subprocess.run(["userdel", user], check=True)
+        state, key_fingerprint = invitation_state(user, record)
+        if expected is not None and state != expected:
+            raise ValueError("Invitation state changed. Refresh the list.")
+        if not record and not (KEYS / user).exists():
+            return {"revoked": True}
+        if expected is None:
+            if state == "active":
+                key = public_key((KEYS / user).read_text().strip().split(" ", 1)[1])
+                save_record(user, {**record, "fingerprint": key_fingerprint, "public_key": key})
+            elif state != "revoked":
+                save_record(user, record or {"name": ""})
+            (KEYS / user).unlink(missing_ok=True)
+        delete_account(user)
+        if expected is not None:
+            (KEYS / user).unlink(missing_ok=True)
+            (RECORDS / user).unlink(missing_ok=True)
     return {"revoked": True}
+
+
+def restore(data):
+    user = account(data["user"])
+    with (STATE / user).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        record = read_record(user)
+        state, saved_fingerprint = invitation_state(user, record)
+        if state != "revoked" or not record.get("public_key"):
+            raise ValueError("This access cannot be restored. Issue a new invitation.")
+        key = public_key(record["public_key"])
+        if fingerprint(key) != saved_fingerprint:
+            raise ValueError("Saved public key fingerprint does not match.")
+        delete_account(user)
+        create_account(user)
+        try:
+            write_session_key(user, key)
+        except BaseException:
+            delete_account(user)
+            raise
+    return {"restored": True}
 
 
 if __name__ == "__main__":
@@ -240,10 +330,10 @@ if __name__ == "__main__":
         if operation == "upgrade":
             upgrade()
             sys.exit(0)
-        if operation == "list-v2":
+        if operation in ("list-v2", "list-v3", "list-v4"):
             print(json.dumps(list_access(None)))
             sys.exit(0)
-        result = {"issue": issue, "redeem": redeem, "revoke": revoke, "list": list_access}[operation](request())
+        result = {"issue": issue, "redeem": redeem, "revoke": revoke, "remove-expired": remove_expired, "remove-revoked": remove_revoked, "restore": restore, "list": list_access}[operation](request())
         print(json.dumps(result))
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
         print(f"SSH Tunnel invitations: {error}", file=sys.stderr)
@@ -298,4 +388,5 @@ if ! systemctl reload ssh; then
 fi
 env -u SUDO_USER /usr/local/libexec/ssh-tunnel-invite upgrade
 touch /var/lib/ssh-tunnel-invites/installed-v1 /var/lib/ssh-tunnel-invites/installed-v2 /var/lib/ssh-tunnel-invites/installed-v3 /var/lib/ssh-tunnel-invites/installed-v4
+touch /var/lib/ssh-tunnel-invites/installed-v6
 printf '%s\n' 'SSH Tunnel invitations are installed on port 22.'

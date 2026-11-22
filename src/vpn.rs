@@ -3,6 +3,7 @@ use crate::tunnel::{ssh_command, ssh_error, system_program, Profile};
 use std::env;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,8 +18,8 @@ const INVITATION_INSTALLER: &str = crate::invites::INSTALLER;
 const HELLO: &[u8; 8] = b"SSHVPN1\n";
 const INSTALL_REQUEST: &[u8; 8] = b"SSHVPN0\n";
 
-const VPN_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-vpn ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]"#;
-const INVITATIONS_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-invite ] || [ ! -x /usr/local/libexec/ssh-tunnel-invite-session ] || [ ! -d /var/lib/ssh-tunnel-invites/records ] || [ ! -f /var/lib/ssh-tunnel-invites/installed-v4 ] || [ ! -r /etc/ssh/ssh-tunnel-invites.conf ] || [ ! -r /etc/sudoers.d/ssh-tunnel-invites ] || ! grep -Fxq 'Include /etc/ssh/ssh-tunnel-invites.conf' /etc/ssh/sshd_config"#;
+const VPN_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-vpn ] || [ ! -f /var/lib/ssh-tunnel-vpn/installed-v2 ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]"#;
+const INVITATIONS_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-invite ] || [ ! -x /usr/local/libexec/ssh-tunnel-invite-session ] || [ ! -d /var/lib/ssh-tunnel-invites/records ] || [ ! -f /var/lib/ssh-tunnel-invites/installed-v6 ] || [ ! -r /etc/ssh/ssh-tunnel-invites.conf ] || [ ! -r /etc/sudoers.d/ssh-tunnel-invites ] || ! grep -Fxq 'Include /etc/ssh/ssh-tunnel-invites.conf' /etc/ssh/sshd_config"#;
 const INVITED_VPN_COMMAND: &str = "ssh-tunnel-vpn";
 
 fn is_invited(profile: &Profile) -> bool {
@@ -78,6 +79,32 @@ pub struct Vpn {
     installing: bool,
 }
 
+fn vpn_ssh_job() -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if raw.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        )
+    };
+    if configured == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(job)
+}
+
 impl Vpn {
     pub fn start(
         profile: Profile,
@@ -98,7 +125,10 @@ impl Vpn {
         let (tx, status) = mpsc::channel();
         let worker = thread::Builder::new()
             .spawn(move || {
+                use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+                let job = vpn_ssh_job();
                 let result = (|| {
+                    let job = job.as_ref().map_err(|error| format!("Could not configure VPN SSH process cleanup: {error}"))?;
                     powershell(
                         r"
                         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -146,6 +176,12 @@ impl Vpn {
                         &server_command,
                     ]);
                     let mut ssh = command.spawn().map_err(|e| e.to_string())?;
+                    if unsafe { AssignProcessToJobObject(job.as_raw_handle(), ssh.as_raw_handle()) } == 0 {
+                        let error = io::Error::last_os_error();
+                        let _ = ssh.kill();
+                        let _ = ssh.wait();
+                        return Err(format!("Could not configure VPN SSH process cleanup: {error}"));
+                    }
                     let mut stdin = ssh.stdin.take().expect("piped SSH stdin");
                     let stdout = ssh.stdout.take().expect("piped SSH stdout");
                     *process = Some(ssh);
@@ -507,7 +543,8 @@ mod tests {
         assert!(!installer.contains('\r'));
         assert!(installer.contains(&format!("if {VPN_REQUIRED}; then\n(")));
         assert!(installer.contains(&format!("if {INVITATIONS_REQUIRED}; then\n(")));
-        assert!(installer.contains("/var/lib/ssh-tunnel-invites/installed-v4"));
+        assert!(installer.contains("/var/lib/ssh-tunnel-invites/installed-v6"));
+        assert!(installer.contains("/var/lib/ssh-tunnel-vpn/installed-v2"));
         let command = server_command(installer.len());
         assert!(command.contains(&format!(
             "if {VPN_REQUIRED} || {INVITATIONS_REQUIRED}; then"

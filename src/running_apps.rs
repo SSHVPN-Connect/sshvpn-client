@@ -132,7 +132,12 @@ impl Picker {
         self.selection = None;
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, paths: &mut Vec<PathBuf>) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        paths: &mut Vec<PathBuf>,
+        notices: &mut Vec<(String, bool)>,
+    ) {
         if self
             .worker
             .as_ref()
@@ -169,7 +174,10 @@ impl Picker {
                         })
                         .collect();
                 }
-                Err(error) => self.error = Some(error),
+                Err(error) => {
+                    notices.push((error.clone(), true));
+                    self.error = Some(error);
+                }
             }
         }
         ui.label(

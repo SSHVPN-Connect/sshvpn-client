@@ -20,6 +20,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 UninstallDisplayIcon={app}\ssh-tunnel.exe
+SetupIconFile=..\assets\ssh-tunnel.ico
 OutputDir=..\target\release
 OutputBaseFilename=ssh-tunnel-setup-x64
 Compression=lzma2

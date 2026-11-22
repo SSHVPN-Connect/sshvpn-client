@@ -56,6 +56,7 @@ import signal
 import struct
 import subprocess
 import sys
+import time
 
 DEVICE = "sshvpn0"
 TABLE = "ssh_tunnel_vpn"
@@ -104,6 +105,24 @@ def forward(tun):
             write_all(1, len(packet).to_bytes(2, "big") + packet)
 
 
+def acquire_vpn_lock(lock):
+    deadline = time.monotonic() + 8
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as error:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Another System VPN session still holds the server interface. "
+                    "Disconnect it or wait for it to close, then reconnect."
+                ) from error
+            # SSH stdin reaches EOF if the waiting connection closes.
+            ready, _, _ = select.select([0], [], [], 0.25)
+            if ready:
+                raise RuntimeError("SSH channel closed before the VPN started.")
+
+
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         raise RuntimeError("ssh-tunnel-vpn requires root and takes no arguments")
@@ -112,7 +131,7 @@ def main():
     for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: sys.exit(0))
     with open("/run/ssh-tunnel-vpn.lock", "a", encoding="ascii") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        acquire_vpn_lock(lock)
         uplink = json.loads(subprocess.check_output(
             ["ip", "-j", "-4", "route", "get", "1.1.1.1"]
         ))[0]["dev"]
@@ -162,4 +181,6 @@ chmod 0755 "$temporary"
 mv -f "$temporary" "$target"
 printf '%s\n' 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/91-ssh-tunnel-vpn.conf
 sysctl -w net.ipv4.ip_forward=1
+install -d -m 0755 /var/lib/ssh-tunnel-vpn
+touch /var/lib/ssh-tunnel-vpn/installed-v2
 printf '%s\n' "VPN handler installed at $target."

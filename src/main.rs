@@ -60,9 +60,10 @@ struct Client {
     password: String,
     tunnel: Option<Connection>,
     disconnecting: Option<JoinHandle<std::io::Result<()>>>,
-    notice: Option<(String, bool)>,
+    notices: Vec<(String, bool)>,
     confirming_delete: bool,
     editing: bool,
+    keep_selection_on_insert: Option<usize>,
 }
 
 impl Client {
@@ -78,7 +79,12 @@ impl Client {
             },
             Err(_) => Profiles::default(),
         };
-        let notice = directory.as_ref().err().map(|error| (error.clone(), true));
+        let notices = directory
+            .as_ref()
+            .err()
+            .map(|error| (error.clone(), true))
+            .into_iter()
+            .collect();
         let mut client = Self {
             directory,
             profiles,
@@ -87,9 +93,10 @@ impl Client {
             password: String::new(),
             tunnel: None,
             disconnecting: None,
-            notice,
+            notices,
             confirming_delete: false,
             editing: false,
+            keep_selection_on_insert: None,
         };
         client.load_selection();
         client.editing = false;
@@ -106,6 +113,37 @@ impl Client {
         self.password.clear();
         self.confirming_delete = false;
         self.editing = self.profiles.selected.is_none();
+    }
+
+    fn new_profile_editor(&self) -> Self {
+        let mut profiles = self.profiles.clone();
+        let keep_selection_on_insert = profiles.selected.take();
+        let mut editor = Self {
+            directory: self.directory.clone(),
+            profiles,
+            draft: SavedProfile::default(),
+            local_port: String::new(),
+            password: String::new(),
+            tunnel: None,
+            disconnecting: None,
+            notices: Vec::new(),
+            confirming_delete: false,
+            editing: true,
+            keep_selection_on_insert,
+        };
+        editor.load_selection();
+        editor
+    }
+
+    fn append_profile(&mut self, profile: SavedProfile) -> Result<(), String> {
+        let mut updated = self.profiles.clone();
+        updated.selected = self
+            .keep_selection_on_insert
+            .or(Some(updated.entries.len()));
+        updated.entries.push(profile);
+        self.store(updated)?;
+        self.load_selection();
+        Ok(())
     }
 
     fn dirty(&self) -> bool {
@@ -220,8 +258,7 @@ impl Client {
         if let Some(index) = updated.selected {
             updated.entries[index] = profile.clone();
         } else {
-            updated.selected = Some(updated.entries.len());
-            updated.entries.push(profile.clone());
+            return self.append_profile(profile);
         }
         self.store(updated)?;
         self.load_selection();
@@ -260,9 +297,7 @@ impl Client {
                 .join()
                 .map_err(|_| "VPN cleanup worker stopped unexpectedly.".to_owned())
                 .and_then(|result| result.map_err(|error| error.to_string()));
-            if let Err(error) = result {
-                self.report(Err(error), None);
-            }
+            self.report(result, Some("Туннель отключён."));
         }
     }
 
@@ -337,10 +372,11 @@ impl Client {
     }
 
     fn report(&mut self, result: Result<(), String>, success: Option<&str>) {
-        self.notice = match result {
+        let notice = match result {
             Ok(()) => success.map(|message| (message.to_owned(), false)),
             Err(error) => Some((error, true)),
         };
+        self.notices.extend(notice);
     }
 }
 
@@ -359,9 +395,10 @@ mod tests {
             password: "in-memory secret".into(),
             tunnel: None,
             disconnecting: None,
-            notice: None,
+            notices: Vec::new(),
             confirming_delete: false,
             editing: true,
+            keep_selection_on_insert: None,
         };
         client.draft.connection.server = "first.example".into();
         client.draft.connection.user = "alice".into();
@@ -417,6 +454,16 @@ mod tests {
         assert!(client.draft.encrypted_secret.is_none());
         client.delete_profile().unwrap();
         assert_eq!(client.draft.name, "Home");
+        let mut editor = client.new_profile_editor();
+        assert!(editor.profiles.selected.is_none());
+        editor.draft.name = "New profile".into();
+        editor.draft.connection.server = "new.example".into();
+        editor.draft.connection.user = "new-user".into();
+        editor.save_profile().unwrap();
+        let saved = Profiles::load(temp.path()).unwrap();
+        assert_eq!(saved.selected, Some(0));
+        assert_eq!(saved.entries[0].name, "Home");
+        assert_eq!(saved.entries[1].name, "New profile");
 
         let (finish, wait) = std::sync::mpsc::channel();
         client.disconnecting = Some(thread::spawn(move || {
@@ -449,19 +496,35 @@ fn main() -> eframe::Result {
             Err(error) => Some((error, true)),
         }
     };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1000.0, 660.0])
+        .with_min_inner_size([700.0, 520.0]);
+    if let Ok(icon) = image::load_from_memory_with_format(
+        include_bytes!("../assets/ssh-tunnel.ico"),
+        image::ImageFormat::Ico,
+    ) {
+        let icon = icon.into_rgba8();
+        viewport = viewport.with_icon(egui::IconData {
+            width: icon.width(),
+            height: icon.height(),
+            rgba: icon.into_raw(),
+        });
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 660.0])
-            .with_min_inner_size([700.0, 520.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
-        if debug_ui { "SSH Tunnel (Debug)" } else { "SSH Tunnel" },
+        if debug_ui {
+            "SSH Tunnel (Debug)"
+        } else {
+            "SSH Tunnel"
+        },
         options,
         Box::new(move |cc| {
             let mut client = Client::new();
-            if elevation_notice.is_some() && client.notice.is_none() {
-                client.notice = elevation_notice;
+            if client.notices.is_empty() {
+                client.notices.extend(elevation_notice);
             }
             Ok(Box::new(ui::Desktop::new(&cc.egui_ctx, client)?))
         }),
