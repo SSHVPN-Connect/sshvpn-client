@@ -9,7 +9,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MTU: usize = 1420;
 const ADAPTER_GUID: u128 = 0x9648bb2f_098b_4d6c_8f35_7c011cdf8651;
@@ -74,7 +74,7 @@ pub struct Vpn {
     child: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
     status: mpsc::Receiver<Result<Status, String>>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<io::Result<()>>>,
     ready: bool,
     installing: bool,
 }
@@ -127,6 +127,7 @@ impl Vpn {
             .spawn(move || {
                 use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
                 let job = vpn_ssh_job();
+                let mut worker_ready = false;
                 let result = (|| {
                     let job = job.as_ref().map_err(|error| format!("Could not configure VPN SSH process cleanup: {error}"))?;
                     powershell(
@@ -235,10 +236,16 @@ impl Vpn {
                     );
                     let mut routes = Routes::new(index, ip);
                     routes.apply(split.as_deref())?;
+                    worker_ready = true;
                     tx.send(Ok(Status::Ready)).map_err(|e| e.to_string())?;
-                    let result = forward(&session, stdin, frames_rx);
+                    let result = forward(&session, stdin, &frames_rx, &worker_cancelled);
+                    let graceful = if result.is_ok() && worker_cancelled.load(Ordering::Acquire) {
+                        wait_for_ssh_exit(&child_for_worker, &frames_rx).map_err(|error| error.to_string())
+                    } else {
+                        Ok(())
+                    };
                     let cleanup = routes.remove();
-                    result.and(cleanup)
+                    result.and(graceful).and(cleanup)
                 })();
                 if let Ok(mut child) = child_for_worker.lock() {
                     if let Some(mut ssh) = child.take() {
@@ -246,7 +253,11 @@ impl Vpn {
                         let _ = ssh.wait();
                     }
                 }
+                if worker_cancelled.load(Ordering::Acquire) {
+                    return if result.is_err() && !worker_ready { Ok(()) } else { result.map_err(io::Error::other) };
+                }
                 let _ = tx.send(result.and(Err("VPN session ended.".into())));
+                Ok(())
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -285,13 +296,21 @@ impl Vpn {
 
     pub fn stop(&mut self) -> io::Result<()> {
         self.cancelled.store(true, Ordering::Release);
-        if let Ok(mut child) = self.child.lock() {
-            if let Some(ssh) = child.as_mut() {
-                let _ = ssh.kill();
-            }
-        }
         if let Some(worker) = self.worker.take() {
-            worker
+            if self.ready {
+                let deadline = Instant::now() + Duration::from_secs(6);
+                while !worker.is_finished() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+            if !worker.is_finished() {
+                if let Ok(mut child) = self.child.lock() {
+                    if let Some(ssh) = child.as_mut() {
+                        let _ = ssh.kill();
+                    }
+                }
+            }
+            return worker
                 .join()
                 .map_err(|_| io::Error::other("VPN worker failed."))?;
         }
@@ -370,12 +389,42 @@ fn read_packets(
     }
 }
 
+fn wait_for_ssh_exit(
+    child: &Mutex<Option<Child>>,
+    frames: &mpsc::Receiver<io::Result<Vec<u8>>>,
+) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        for _ in 0..128 {
+            if frames.try_recv().is_err() {
+                break;
+            }
+        }
+        let status = child
+            .lock()
+            .map_err(|_| io::Error::other("VPN SSH process lock failed."))?
+            .as_mut()
+            .ok_or_else(|| io::Error::other("VPN SSH process is missing."))?
+            .try_wait()?;
+        if status.is_some_and(|status| status.success()) {
+            return Ok(());
+        }
+        if status.is_some() || Instant::now() >= deadline {
+            return Err(io::Error::other(
+                "Сервер не подтвердил отключение VPN. Подождите несколько секунд перед повторным подключением.",
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn forward(
     session: &Arc<wintun::Session>,
     mut stdin: ChildStdin,
-    frames: mpsc::Receiver<io::Result<Vec<u8>>>,
+    frames: &mpsc::Receiver<io::Result<Vec<u8>>>,
+    cancelled: &AtomicBool,
 ) -> Result<(), String> {
-    loop {
+    while !cancelled.load(Ordering::Acquire) {
         let mut busy = false;
         for _ in 0..32 {
             match frames.try_recv() {
@@ -408,6 +457,7 @@ fn forward(
             thread::sleep(Duration::from_millis(2));
         }
     }
+    Ok(())
 }
 
 struct Routes {
