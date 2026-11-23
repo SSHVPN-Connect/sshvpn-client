@@ -192,6 +192,7 @@ pub struct Desktop {
     next_toast_id: u64,
     closing: bool,
     tray: Option<crate::tray::Tray>,
+    pub(crate) instance_listener: Option<crate::instance::Listener>,
     tray_initialized: bool,
     update: Option<JoinHandle<Result<Option<std::path::PathBuf>, String>>>,
 }
@@ -255,6 +256,7 @@ impl Desktop {
             next_toast_id: 0,
             closing: false,
             tray: None,
+            instance_listener: None,
             tray_initialized: false,
             update: None,
         })

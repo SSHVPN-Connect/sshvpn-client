@@ -7,6 +7,7 @@ mod app_tunnel;
 mod askpass;
 mod credentials;
 mod elevation;
+mod instance;
 mod invite_ui;
 mod invites;
 mod profiles;
@@ -486,6 +487,10 @@ fn main() -> eframe::Result {
     if let Some(result) = askpass::run_helper() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
+    let instance_name = instance::Instance::name();
+    if instance::Instance::activate_existing(&instance_name) {
+        return Ok(());
+    }
     let debug_ui = cfg!(debug_assertions);
     let elevation_notice = if debug_ui {
         None
@@ -495,6 +500,11 @@ fn main() -> eframe::Result {
             Ok(elevation::Startup::Elevated) => None,
             Err(error) => Some((error, true)),
         }
+    };
+    let Some(instance) = instance::Instance::claim(&instance_name)
+        .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
+    else {
+        return Ok(());
     };
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1000.0, 660.0])
@@ -526,7 +536,13 @@ fn main() -> eframe::Result {
             if client.notices.is_empty() {
                 client.notices.extend(elevation_notice);
             }
-            Ok(Box::new(ui::Desktop::new(&cc.egui_ctx, client)?))
+            let mut desktop = ui::Desktop::new(&cc.egui_ctx, client)?;
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let RawWindowHandle::Win32(handle) = cc.window_handle()?.as_raw() {
+                desktop.instance_listener =
+                    Some(instance.listen(handle.hwnd.get(), cc.egui_ctx.clone())?);
+            }
+            Ok(Box::new(desktop))
         }),
     )
 }
