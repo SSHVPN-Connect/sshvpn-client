@@ -20,7 +20,7 @@ use std::{
 
 const VERSION: &str = "ssh-tunnel-invite-1";
 const HANDLER: &str = "/usr/local/libexec/ssh-tunnel-invite";
-const LIST_COMMAND: &str = "/usr/local/libexec/ssh-tunnel-invite list-v4";
+const LIST_COMMAND: &str = "/usr/local/libexec/ssh-tunnel-invite list-v5";
 pub(crate) const INSTALLER: &str = include_str!("../install-invitations.sh");
 pub(crate) const UPDATE_REQUIRED: &str =
     "На сервере установлена старая версия поддержки приглашений. Нажмите «Обновить сервер».";
@@ -391,7 +391,7 @@ pub fn list(profile: &SavedProfile, secret: String) -> Result<Vec<AccessEntry>, 
     )
     .map_err(|error| {
         if error.lines().any(|line| {
-            line.trim() == "SSH Tunnel invitations: 'list-v4'"
+            line.trim() == "SSH Tunnel invitations: 'list-v5'"
                 || (line.contains(HANDLER) && line.contains("No such file or directory"))
         }) {
             UPDATE_REQUIRED.to_owned()

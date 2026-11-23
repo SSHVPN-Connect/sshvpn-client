@@ -86,15 +86,31 @@ def fingerprint(key):
     return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
 
 
+EXPIRY_OPTION = re.compile(r'^restrict,expiry-time="([0-9]{14}Z?)",command=')
+UTC_EXPIRY_FORMAT = "%Y%m%d%H%M%SZ"
+
+
+def utc_expiry(value):
+    if value.endswith("Z"):
+        return datetime.datetime.strptime(value, UTC_EXPIRY_FORMAT).replace(tzinfo=datetime.timezone.utc)
+    return datetime.datetime.strptime(value, "%Y%m%d%H%M%S").astimezone(datetime.timezone.utc)
+
+
+def ssh_expiry(expiry):
+    # Older OpenSSH versions parse expiry-time as local time without a suffix.
+    return expiry.astimezone().strftime("%Y%m%d%H%M%S")
+
+
 def invitation_state(user, record):
     try:
         key = (KEYS / user).read_text().strip()
     except FileNotFoundError:
         return "revoked", record.get("fingerprint")
-    match = re.match(r'restrict,expiry-time="([0-9]{14}Z)",command=', key)
+    match = EXPIRY_OPTION.match(key)
     if match:
-        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%SZ")
-        return ("pending" if match[1] > now else "expired"), None
+        expiry = utc_expiry(record.get("expires", match[1]))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return ("pending" if expiry > now else "expired"), None
     return "active", fingerprint(public_key(key.split(" ", 1)[1]))
 
 
@@ -204,14 +220,15 @@ def issue(data):
         raise ValueError("Invalid recipient name.")
     host = public_key(" ".join(Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text().split()[:2]))
     user = "stv_" + secrets.token_hex(8)
-    expiry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)).strftime("%Y%m%d%H%M%SZ")
+    expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
+    expires = expiry.strftime(UTC_EXPIRY_FORMAT)
     create_account(user)
     try:
         with (STATE / user).open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            save_record(user, {"name": name})
+            save_record(user, {"name": name, "expires": expires})
             try:
-                command = f'restrict,expiry-time="{expiry}",command="/usr/bin/sudo -n {OWNER} redeem"'
+                command = f'restrict,expiry-time="{ssh_expiry(expiry)}",command="/usr/bin/sudo -n {OWNER} redeem"'
                 write_key(KEYS / user, f"{command} {key}")
             except BaseException:
                 (RECORDS / user).unlink(missing_ok=True)
@@ -219,7 +236,7 @@ def issue(data):
     except BaseException:
         subprocess.run(["userdel", user], check=False)
         raise
-    return {"user": user, "host_key": host, "expires": expiry}
+    return {"user": user, "host_key": host, "expires": expires}
 
 
 def redeem(data):
@@ -227,10 +244,7 @@ def redeem(data):
     key = public_key(data["public_key"])
     with (STATE / user).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        saved = (KEYS / user).read_text()
-        match = re.match(r'restrict,expiry-time="([0-9]{14}Z)",command=', saved)
-        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%SZ")
-        if not match or match[1] <= now:
+        if invitation_state(user, read_record(user))[0] != "pending":
             raise ValueError("Invitation was already used or has expired.")
         write_session_key(user, key)
     return {"user": user}
@@ -252,6 +266,13 @@ def upgrade():
                 continue
             if saved.startswith(LEGACY_KEY):
                 write_session_key(path.name, public_key(saved[len(LEGACY_KEY):]))
+                continue
+            match = EXPIRY_OPTION.match(saved)
+            if match and match[1].endswith("Z"):
+                expires = match[1]
+                save_record(path.name, {**read_record(path.name), "expires": expires})
+                write_key(path, saved[:match.start(1)] + ssh_expiry(utc_expiry(expires)) + saved[match.end(1):])
+
 
 
 def delete_account(user):
@@ -330,7 +351,7 @@ if __name__ == "__main__":
         if operation == "upgrade":
             upgrade()
             sys.exit(0)
-        if operation in ("list-v2", "list-v3", "list-v4"):
+        if operation in ("list-v2", "list-v3", "list-v4", "list-v5"):
             print(json.dumps(list_access(None)))
             sys.exit(0)
         result = {"issue": issue, "redeem": redeem, "revoke": revoke, "remove-expired": remove_expired, "remove-revoked": remove_revoked, "restore": restore, "list": list_access}[operation](request())
@@ -388,5 +409,5 @@ if ! systemctl reload ssh; then
 fi
 env -u SUDO_USER /usr/local/libexec/ssh-tunnel-invite upgrade
 touch /var/lib/ssh-tunnel-invites/installed-v1 /var/lib/ssh-tunnel-invites/installed-v2 /var/lib/ssh-tunnel-invites/installed-v3 /var/lib/ssh-tunnel-invites/installed-v4
-touch /var/lib/ssh-tunnel-invites/installed-v6
+touch /var/lib/ssh-tunnel-invites/installed-v6 /var/lib/ssh-tunnel-invites/installed-v7
 printf '%s\n' 'SSH Tunnel invitations are installed on port 22.'

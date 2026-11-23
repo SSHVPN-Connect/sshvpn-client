@@ -19,7 +19,7 @@ const HELLO: &[u8; 8] = b"SSHVPN1\n";
 const INSTALL_REQUEST: &[u8; 8] = b"SSHVPN0\n";
 
 const VPN_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-vpn ] || [ ! -f /var/lib/ssh-tunnel-vpn/installed-v2 ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]"#;
-const INVITATIONS_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-invite ] || [ ! -x /usr/local/libexec/ssh-tunnel-invite-session ] || [ ! -d /var/lib/ssh-tunnel-invites/records ] || [ ! -f /var/lib/ssh-tunnel-invites/installed-v6 ] || [ ! -r /etc/ssh/ssh-tunnel-invites.conf ] || [ ! -r /etc/sudoers.d/ssh-tunnel-invites ] || ! grep -Fxq 'Include /etc/ssh/ssh-tunnel-invites.conf' /etc/ssh/sshd_config"#;
+const INVITATIONS_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-invite ] || [ ! -x /usr/local/libexec/ssh-tunnel-invite-session ] || [ ! -d /var/lib/ssh-tunnel-invites/records ] || [ ! -f /var/lib/ssh-tunnel-invites/installed-v7 ] || [ ! -r /etc/ssh/ssh-tunnel-invites.conf ] || [ ! -r /etc/sudoers.d/ssh-tunnel-invites ] || ! grep -Fxq 'Include /etc/ssh/ssh-tunnel-invites.conf' /etc/ssh/sshd_config"#;
 const INVITED_VPN_COMMAND: &str = "ssh-tunnel-vpn";
 
 fn is_invited(profile: &Profile) -> bool {
@@ -593,7 +593,7 @@ mod tests {
         assert!(!installer.contains('\r'));
         assert!(installer.contains(&format!("if {VPN_REQUIRED}; then\n(")));
         assert!(installer.contains(&format!("if {INVITATIONS_REQUIRED}; then\n(")));
-        assert!(installer.contains("/var/lib/ssh-tunnel-invites/installed-v6"));
+        assert!(installer.contains("/var/lib/ssh-tunnel-invites/installed-v7"));
         assert!(installer.contains("/var/lib/ssh-tunnel-vpn/installed-v2"));
         let command = server_command(installer.len());
         assert!(command.contains(&format!(
