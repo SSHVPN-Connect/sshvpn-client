@@ -14,38 +14,46 @@ unsafe extern "system" {
     ) -> isize;
 }
 
-pub enum Startup {
-    Elevated,
-    Relaunched,
+pub fn is_admin() -> bool {
+    unsafe { IsUserAnAdmin() != 0 }
 }
 
-pub fn request() -> Result<Startup, String> {
-    if unsafe { IsUserAnAdmin() } != 0 {
-        return Ok(Startup::Elevated);
-    }
+pub fn profile_scope() -> std::io::Result<u64> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hash = DefaultHasher::new();
+    crate::Profiles::directory()?.hash(&mut hash);
+    Ok(hash.finish())
+}
 
+pub fn request_connection() -> Result<(), String> {
     let executable = std::env::current_exe()
-        .map_err(|error| format!("Could not request administrator rights: {error}"))?;
+        .map_err(|error| format!("Не удалось найти исполняемый файл: {error}"))?;
+    let scope = profile_scope().map_err(|error| error.to_string())?;
+    run_as_admin(&executable, &format!("--connect-elevated {scope}"))
+        .map_err(|error| format!("Не удалось запустить System VPN с правами администратора: {error}"))
+}
+
+pub fn run_as_admin(executable: &std::path::Path, arguments: &str) -> std::io::Result<()> {
     let executable: Vec<u16> = executable
         .as_os_str()
         .encode_wide()
         .chain(Some(0))
         .collect();
     let runas: Vec<u16> = "runas".encode_utf16().chain(Some(0)).collect();
-    // The executable and verb are null-terminated, and no arguments are passed.
+    let arguments: Vec<u16> = arguments.encode_utf16().chain(Some(0)).collect();
     let result = unsafe {
         ShellExecuteW(
             ptr::null_mut(),
             runas.as_ptr(),
             executable.as_ptr(),
-            ptr::null(),
+            arguments.as_ptr(),
             ptr::null(),
             1,
         )
     };
     if result > 32 {
-        Ok(Startup::Relaunched)
+        Ok(())
     } else {
-        Err("Administrator rights were not granted. SOCKS5 is available. Restart the app to enable System VPN.".into())
+        Err(std::io::Error::last_os_error())
     }
 }

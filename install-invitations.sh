@@ -4,9 +4,13 @@ set -eu
 . /etc/os-release
 case "$ID" in debian|ubuntu) ;; *) echo 'Debian or Ubuntu is required.' >&2; exit 1 ;; esac
 if ! command -v sudo >/dev/null || ! command -v python3 >/dev/null; then
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo python3
+    if command -v sshvpn_setup_stage >/dev/null; then sshvpn_setup_stage p; fi
+    apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+    if command -v sshvpn_setup_stage >/dev/null; then sshvpn_setup_stage d; fi
+    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 \
+        -o Acquire::https::Timeout=15 -o DPkg::Lock::Timeout=120 install -y --no-install-recommends sudo python3
 fi
+if command -v sshvpn_setup_stage >/dev/null; then sshvpn_setup_stage i; fi
 getent group ssh-tunnel-share >/dev/null || groupadd --system ssh-tunnel-share
 install -d -m 0755 /usr/local/libexec /etc/ssh/ssh-tunnel-invites
 install -d -m 0700 /var/lib/ssh-tunnel-invites

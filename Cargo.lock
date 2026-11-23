@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-tunnel"
-version = "0.4.15"
+version = "0.4.20"
 dependencies = [
  "aes-gcm",
  "base64",

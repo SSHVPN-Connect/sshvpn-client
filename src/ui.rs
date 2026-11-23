@@ -177,9 +177,18 @@ fn paint_toast_content(ui: &mut Ui, toast: &Toast, color: Color32) -> bool {
     response.on_hover_text("Закрыть уведомление").clicked()
 }
 
+enum UpdateJob {
+    Check {
+        automatic: bool,
+        worker: JoinHandle<Result<Option<String>, String>>,
+    },
+    Download(JoinHandle<Result<std::path::PathBuf, String>>),
+}
+
 pub struct Desktop {
     client: Client,
     new_profile_editor: Option<Client>,
+    profile_setup: Option<JoinHandle<Result<crate::SavedProfile, String>>>,
     assets: Assets,
     running_apps: crate::running_apps::Picker,
     invitations: crate::invite_ui::InviteUi,
@@ -187,6 +196,8 @@ pub struct Desktop {
     access_owner: Option<String>,
     profile_tab: ProfileTab,
     routing: Option<crate::profiles::Ipv4Routing>,
+    ru_ranges: Option<Result<crate::ru_ranges::RuRanges, String>>,
+    ru_worker: Option<JoinHandle<Result<crate::ru_ranges::RuRanges, String>>>,
     animate_connection: bool,
     toasts: Vec<Toast>,
     next_toast_id: u64,
@@ -194,7 +205,9 @@ pub struct Desktop {
     tray: Option<crate::tray::Tray>,
     pub(crate) instance_listener: Option<crate::instance::Listener>,
     tray_initialized: bool,
-    update: Option<JoinHandle<Result<Option<std::path::PathBuf>, String>>>,
+    update: Option<UpdateJob>,
+    check_updates_on_start: bool,
+    available_update: Option<String>,
 }
 
 impl Desktop {
@@ -244,6 +257,7 @@ impl Desktop {
         Ok(Self {
             client,
             new_profile_editor: None,
+            profile_setup: None,
             assets: Assets::load(ctx)?,
             running_apps: crate::running_apps::Picker::default(),
             invitations: crate::invite_ui::InviteUi::default(),
@@ -251,6 +265,8 @@ impl Desktop {
             access_owner: None,
             profile_tab: ProfileTab::default(),
             routing: None,
+            ru_ranges: None,
+            ru_worker: None,
             animate_connection: windows_allows_motion(),
             toasts: Vec::new(),
             next_toast_id: 0,
@@ -259,6 +275,8 @@ impl Desktop {
             instance_listener: None,
             tray_initialized: false,
             update: None,
+            check_updates_on_start: true,
+            available_update: None,
         })
     }
 
@@ -346,7 +364,7 @@ impl Desktop {
                         ui.label(RichText::new("Нет сохранённых профилей").color(MUTED));
                     }
                     for (index, profile) in self.client.profiles.entries.iter().enumerate() {
-                        ui.add_enabled_ui(manageable, |ui| {
+                        ui.add_enabled_ui(self.client.directory.is_ok(), |ui| {
                             ui.push_id(index, |ui| {
                                 let (rect, response, hover) =
                                     control(ui, vec2(208.0, 60.0), &profile.name);
@@ -392,23 +410,29 @@ impl Desktop {
                                     Mode::Socks5 => "SOCKS5 · SSH",
                                 };
                                 text(ui, rect.min + vec2(14.0, 34.0), detail, 12.0, MUTED);
-                                response.context_menu(|ui| {
-                                    if pill(ui, "Редактировать профиль", 205.0, false).clicked()
-                                    {
-                                        editing = Some(index);
-                                        ui.close_menu();
-                                    }
-                                });
-                                if response.double_clicked() {
+                                if manageable {
+                                    response.context_menu(|ui| {
+                                        if pill(ui, "Редактировать профиль", 205.0, false).clicked()
+                                        {
+                                            editing = Some(index);
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                                if manageable && response.double_clicked() {
                                     editing = Some(index);
-                                } else if response
-                                    .on_hover_text(format!(
-                                        "{}\nПравый клик — редактировать профиль",
-                                        profile.connection.server
-                                    ))
-                                    .clicked()
-                                {
-                                    selected = Some(index);
+                                } else {
+                                    let hint = if manageable {
+                                        format!(
+                                            "{}\nПравый клик — редактировать профиль",
+                                            profile.connection.server
+                                        )
+                                    } else {
+                                        profile.connection.server.clone()
+                                    };
+                                    if response.on_hover_text(hint).clicked() {
+                                        selected = Some(index);
+                                    }
                                 }
                             })
                         });
@@ -424,16 +448,16 @@ impl Desktop {
                     .color(MUTED),
             );
             ui.add_space(5.0);
-            let update_label = if self.update.is_some() {
-                "Проверяю обновления…"
-            } else {
-                "Проверить обновления"
+            let update_label = match self.update {
+                Some(UpdateJob::Check { .. }) => "Проверяю обновления…",
+                Some(UpdateJob::Download(_)) => "Скачиваю обновление…",
+                None => "Проверить обновления",
             };
             ui.add_enabled_ui(
                 self.update.is_none() && self.client.tunnel.is_none() && !stopping,
                 |ui| {
                     if pill(ui, update_label, 183.0, false).clicked() {
-                        self.update = Some(thread::spawn(crate::updater::prepare));
+                        self.check_for_update(false);
                     }
                 },
             );
@@ -483,6 +507,7 @@ impl Desktop {
                     )
                 },
             );
+            self.access.refresh();
         }
         ui.horizontal(|ui| {
             let width = ui.available_width();
@@ -496,7 +521,7 @@ impl Desktop {
                 Layout::top_down(Align::Min),
                 |ui| {
                     ui.set_min_width((width - share_width).max(90.0));
-                    ui.label(RichText::new("Подключение").small().color(MUTED));
+                    ui.label(RichText::new("Выбранный профиль").small().color(MUTED));
                     let name = self.client.draft.name.trim();
                     ui.add(
                         egui::Label::new(
@@ -520,30 +545,48 @@ impl Desktop {
             .tunnel
             .as_ref()
             .is_some_and(Connection::is_ready);
+        let configuring_adapter = matches!(
+            self.client.tunnel.as_ref(),
+            Some(Connection::Vpn(vpn)) if vpn.is_configuring_adapter()
+        );
         let (status, action) = if stopping {
             ("Отключение…", "Подождите…")
         } else if ready {
             ("Подключено", "Отключить")
-        } else if matches!(self.client.tunnel.as_ref(), Some(Connection::Vpn(vpn)) if vpn.is_installing())
-        {
-            ("Настройка сервера", "Отмена")
+        } else if configuring_adapter {
+            ("Настройка адаптера", "Отмена")
         } else if active {
             ("Подключение…", "Отмена")
         } else {
             ("Не подключено", "Подключить")
         };
-        let mut mode = self.client.draft.mode;
-        let routing = &self.client.draft.ipv4_routing;
+        let running_profile = self.client.active_profile.as_ref();
+        let mut mode = running_profile.map_or(self.client.draft.mode, |profile| profile.mode);
+        let routing = running_profile.map_or(&self.client.draft.ipv4_routing, |profile| {
+            &profile.ipv4_routing
+        });
         let route = if routing.by_application {
             "Выбранные приложения"
         } else if routing.split {
             "Список CIDR"
+        } else if routing.exclude_ru {
+            "IPv4 без IP из РФ"
         } else {
             "Весь IPv4-трафик"
         };
+        let socks_port = running_profile.map_or(self.client.draft.connection.socks_port, |profile| {
+            profile.socks_port
+        });
+        let connection_label = match running_profile {
+            Some(profile) if !profile.name.trim().is_empty() => {
+                format!("{} · {}", profile.name.trim(), profile.server.trim())
+            }
+            Some(profile) => profile.server.trim().to_owned(),
+            None => self.client.draft.connection.server.trim().to_owned(),
+        };
         let proxy = match self.client.tunnel.as_ref() {
             Some(Connection::Socks(tunnel)) if ready => tunnel.endpoint().to_string(),
-            _ => format!("127.0.0.1:{}", self.client.draft.connection.socks_port),
+            _ => format!("127.0.0.1:{socks_port}"),
         };
         let mut connect = false;
         let transition = if self.animate_connection {
@@ -591,13 +634,14 @@ impl Desktop {
                 ui.add_space(7.0);
                 ui.vertical(|ui| {
                     ui.add(egui::Label::new(RichText::new(status).size(30.0).strong()).truncate());
-                    let server = self.client.draft.connection.server.trim();
-                    if !server.is_empty() {
+                    if !connection_label.is_empty() {
                         ui.add(
-                            egui::Label::new(RichText::new(server).size(13.0).color(MUTED))
-                                .truncate(),
+                            egui::Label::new(
+                                RichText::new(connection_label.as_str()).size(13.0).color(MUTED),
+                            )
+                            .truncate(),
                         )
-                        .on_hover_text(server);
+                        .on_hover_text(connection_label.as_str());
                     }
                 });
             });
@@ -639,12 +683,22 @@ impl Desktop {
         if connect {
             if selected.is_none() && !active {
                 self.client.editing = true;
+            } else if !active && mode == Mode::SystemVpn && !crate::elevation::is_admin() {
+                let result = self
+                    .client
+                    .ensure_saved()
+                    .and_then(|()| crate::elevation::request_connection());
+                if result.is_ok() {
+                    self.closing = true;
+                    ui.ctx().request_repaint();
+                }
+                self.client.report(result, None);
             } else {
                 let result = self.client.toggle_connection();
                 self.client.report(result, None);
             }
         }
-        if mode != self.client.draft.mode {
+        if manageable && mode != self.client.draft.mode {
             let result = self.client.set_mode(mode);
             self.client.report(result, None);
         }
@@ -661,6 +715,9 @@ impl Desktop {
                         && tab != self.profile_tab
                     {
                         self.profile_tab = tab;
+                        if tab == ProfileTab::Users {
+                            self.access.refresh();
+                        }
                     }
                 }
             });
@@ -700,6 +757,9 @@ impl Desktop {
     }
 
     fn routing_panel(&mut self, ui: &mut Ui) {
+        if self.routing.is_none() {
+            self.ru_ranges = None;
+        }
         let routing = self
             .routing
             .get_or_insert_with(|| self.client.draft.ipv4_routing.clone());
@@ -724,6 +784,57 @@ impl Desktop {
             return;
         }
         ui.add_space(12.0);
+        if ru_exclusion_control(ui, routing) {
+            self.ru_ranges = None;
+        }
+        if self
+            .ru_worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            self.ru_ranges = self.ru_worker.take().map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|_| Err("Не удалось прочитать список IPv4 РФ.".into()))
+            });
+        }
+        let mut ru_validation = Ok(());
+        if routing.exclude_ru && !routing.by_application {
+            if self.ru_ranges.is_none() && self.ru_worker.is_none() {
+                let directory = self.client.directory.clone();
+                self.ru_worker = Some(thread::spawn(move || crate::ru_ranges::load(&directory?)));
+            }
+            ru_validation = match &self.ru_ranges {
+                None => {
+                    ui.ctx().request_repaint_after(Duration::from_millis(100));
+                    let message = "Загрузка списка IPv4 РФ…";
+                    ui.label(RichText::new(message).color(MUTED).size(12.0));
+                    Err(message.to_owned())
+                }
+                Some(Err(error)) => {
+                    ui.label(RichText::new(error).color(ERROR).size(12.0));
+                    if compact_pill(ui, "Повторить", 108.0, false).clicked() {
+                        self.ru_ranges = None;
+                        ui.ctx().request_repaint();
+                    }
+                    Err("Для сохранения дождитесь загрузки списка IPv4 РФ.".into())
+                }
+                Some(Ok(ranges)) => {
+                    let conflict = routing
+                        .routes()
+                        .ok()
+                        .flatten()
+                        .and_then(|routes| ranges.validate_included(&routes).err());
+                    if let Some(message) = conflict {
+                        ui.label(RichText::new(&message).color(ERROR).size(12.0));
+                        Err(message)
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+        }
+        ui.add_space(12.0);
         let mut save = false;
         let mut cancel = false;
         ui.horizontal(|ui| {
@@ -738,7 +849,7 @@ impl Desktop {
             } else {
                 routing.routes().map(|_| ())
             };
-            let result = validation.and_then(|()| {
+            let result = validation.and(ru_validation).and_then(|()| {
                 let index = self.client.profiles.selected.ok_or("Выберите профиль.")?;
                 let mut updated = self.client.profiles.clone();
                 updated.entries[index].ipv4_routing = routing.clone();
@@ -906,8 +1017,140 @@ impl Desktop {
                 .layout(Layout::top_down(Align::Min)),
         );
         if pill(&mut save, "Сохранить", 123.0, true).clicked() {
-            let result = self.client.save_profile();
-            self.client.report(result, Some("Профиль сохранён."));
+            if let Err(error) = self.save_profile() {
+                self.client.report(Err(error), None);
+            }
+        }
+    }
+
+    fn save_profile(&mut self) -> Result<(), String> {
+        let profile = self.client.prepared_profile()?;
+        if self.client.profiles.selected.is_none() && profile.connection.user == "root" {
+            let secret = Client::connection_secret(&profile)?;
+            self.profile_setup = Some(thread::spawn(move || {
+                crate::invites::setup_server(&profile, secret)?;
+                Ok(profile)
+            }));
+        } else {
+            self.client.save_prepared_profile(profile)?;
+            self.client.report(Ok(()), Some("Профиль сохранён."));
+        }
+        Ok(())
+    }
+
+    fn check_for_update(&mut self, automatic: bool) {
+        self.update = Some(UpdateJob::Check {
+            automatic,
+            worker: thread::spawn(crate::updater::check),
+        });
+    }
+
+    fn update_block_reason(&self) -> Option<&'static str> {
+        if self.client.tunnel.is_some() || self.client.disconnecting.is_some() {
+            return Some("Отключите туннель перед обновлением.");
+        }
+        if self.client.dirty()
+            || self.new_profile_editor.is_some()
+            || self
+                .routing
+                .as_ref()
+                .is_some_and(|routing| routing != &self.client.draft.ipv4_routing)
+        {
+            return Some("Сохраните правки профиля перед обновлением.");
+        }
+        None
+    }
+
+    fn update_dialog(&mut self, ctx: &egui::Context) {
+        let Some(version) = self.available_update.as_ref() else {
+            return;
+        };
+        let downloading = matches!(self.update, Some(UpdateJob::Download(_)));
+        let blocked = self.update_block_reason();
+        let dialog = egui::Modal::new(egui::Id::new("available_update"))
+            .frame(dialog_frame())
+            .show(ctx, |ui| {
+                ui.set_width(386.0);
+                ui.heading("Вышла новая версия приложения");
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!("Версия {}", version.trim_start_matches('v')))
+                        .color(MUTED),
+                );
+                ui.add_space(12.0);
+                if downloading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Скачиваю обновление…");
+                    });
+                    return (false, false);
+                }
+                if let Some(reason) = blocked {
+                    ui.label(RichText::new(reason).color(MUTED));
+                    ui.add_space(8.0);
+                }
+                ui.horizontal(|ui| {
+                    let later = pill(ui, "Позже", 104.0, false).clicked();
+                    let install = ui
+                        .add_enabled_ui(blocked.is_none(), |ui| {
+                            pill(ui, "Обновить", 122.0, true).clicked()
+                        })
+                        .inner;
+                    (later, install)
+                })
+                .inner
+            });
+        let (later, install) = dialog.inner;
+        if install {
+            let confirmed = version.clone();
+            let worker = thread::spawn(move || crate::updater::prepare(&confirmed));
+            self.update = Some(UpdateJob::Download(worker));
+        } else if !downloading && (later || dialog.should_close()) {
+            self.available_update = None;
+        }
+    }
+
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        let finished = match &self.update {
+            Some(UpdateJob::Check { worker, .. }) => worker.is_finished(),
+            Some(UpdateJob::Download(worker)) => worker.is_finished(),
+            None => return,
+        };
+        if !finished {
+            ctx.request_repaint_after(Duration::from_millis(120));
+            return;
+        }
+        match self.update.take().expect("finished update job") {
+            UpdateJob::Check { automatic, worker } => {
+                let result = worker
+                    .join()
+                    .unwrap_or_else(|_| Err("Проверка обновлений остановилась.".into()));
+                match result {
+                    Ok(Some(version)) => self.available_update = Some(version),
+                    Ok(None) if !automatic => {
+                        self.client.report(Ok(()), Some("Установлена последняя версия."));
+                    }
+                    Err(error) if !automatic => self.client.report(Err(error), None),
+                    _ => {}
+                }
+            }
+            UpdateJob::Download(worker) => {
+                self.available_update = None;
+                let result = worker
+                    .join()
+                    .unwrap_or_else(|_| Err("Скачивание обновления остановилось.".into()));
+                let result = result.and_then(|installer| {
+                    if let Some(reason) = self.update_block_reason() {
+                        return Err(reason.to_owned());
+                    }
+                    crate::updater::launch(installer)
+                        .map_err(|error| format!("Не удалось запустить установщик: {error}"))
+                });
+                match result {
+                    Ok(()) => self.closing = true,
+                    Err(error) => self.client.report(Err(error), None),
+                }
+            }
         }
     }
 
@@ -949,6 +1192,25 @@ impl Desktop {
     }
 
     fn editor(&mut self, ctx: &egui::Context) {
+        if self
+            .profile_setup
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            let result = self
+                .profile_setup
+                .take()
+                .expect("finished server setup job")
+                .join()
+                .unwrap_or_else(|_| Err("Настройка сервера прервана.".into()))
+                .and_then(|profile| self.client.save_prepared_profile(profile));
+            let saved = result.is_ok();
+            self.client.report(result, Some("Сервер настроен. Профиль сохранён."));
+            if saved {
+                self.access.refresh();
+                return;
+            }
+        }
         let id = egui::Id::new("profile_editor");
         let width = (ctx.screen_rect().width() - 70.0).clamp(300.0, 656.0);
         let modal = egui::Modal::new(id)
@@ -956,6 +1218,16 @@ impl Desktop {
             .backdrop_color(Color32::from_rgba_unmultiplied(13, 13, 23, 185));
         let result = modal.show(ctx, |ui| {
             ui.set_width(width - 60.0);
+            if self.profile_setup.is_some() {
+                ctx.request_repaint_after(Duration::from_millis(120));
+                ui.heading("Настройка сервера");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Подготавливаем VPN и приглашения по SSH…");
+                });
+                return false;
+            }
             let mut close = false;
             ui.horizontal(|ui| {
                 let title = if self.client.profiles.selected.is_some() {
@@ -1005,7 +1277,10 @@ impl Desktop {
                 });
             close
         });
-        if (result.inner || result.should_close()) && self.invitations.can_leave_import() {
+        if self.profile_setup.is_none()
+            && (result.inner || result.should_close())
+            && self.invitations.can_leave_import()
+        {
             self.invitations.close_import();
             self.client.load_selection();
             self.client.editing = false;
@@ -1150,6 +1425,7 @@ impl Desktop {
             self.access.refresh();
         }
         self.confirm_profile_deletion(ctx);
+        self.update_dialog(ctx);
         self.show_toasts(ctx);
     }
 }
@@ -1174,50 +1450,18 @@ impl eframe::App for Desktop {
             self.client.disconnect();
         }
         if self
-            .update
+            .instance_listener
             .as_ref()
-            .is_some_and(|worker| worker.is_finished())
+            .is_some_and(crate::instance::Listener::take_shutdown_request)
         {
-            let result = self
-                .update
-                .take()
-                .expect("update worker")
-                .join()
-                .map_err(|_| "Проверка обновлений остановилась.".to_owned())
-                .and_then(|result| result);
-            match result {
-                Ok(Some(installer))
-                    if self.client.tunnel.is_none()
-                        && self.client.disconnecting.is_none()
-                        && !self.client.dirty() =>
-                {
-                    match crate::updater::launch(installer) {
-                        Ok(()) => {
-                            self.closing = true;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            return;
-                        }
-                        Err(error) => self.client.report(
-                            Err(format!("Не удалось запустить установщик: {error}")),
-                            None,
-                        ),
-                    }
-                }
-                Ok(Some(_)) => self.client.report(
-                    Err(
-                        "Отключите туннель или сохраните правки профиля и повторите обновление."
-                            .into(),
-                    ),
-                    None,
-                ),
-                Ok(None) => self
-                    .client
-                    .report(Ok(()), Some("Установлена последняя версия.")),
-                Err(error) => self.client.report(Err(error), None),
-            }
+            self.closing = true;
+            self.client.disconnect();
         }
-        if self.update.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(120));
+        if !self.closing {
+            if std::mem::take(&mut self.check_updates_on_start) {
+                self.check_for_update(true);
+            }
+            self.poll_update(ctx);
         }
         if ctx.input(|input| input.viewport().close_requested()) {
             if !self.closing && self.tray.is_some() {
@@ -1650,6 +1894,59 @@ fn segments(ui: &mut Ui, mode: &mut Mode) {
     });
 }
 
+fn ru_exclusion_control(ui: &mut Ui, routing: &mut crate::profiles::Ipv4Routing) -> bool {
+    let before = routing.exclude_ru;
+    surface(BACKGROUND, 12, 12).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Исключение РФ Зоны").strong());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_enabled_ui(!routing.by_application, |ui| {
+                    let (rect, response) = ui.allocate_exact_size(vec2(38.0, 22.0), Sense::click());
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if response.clicked() {
+                        routing.exclude_ru = !routing.exclude_ru;
+                    }
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Checkbox,
+                            ui.is_enabled(),
+                            routing.exclude_ru,
+                            "Исключение РФ Зоны",
+                        )
+                    });
+                    let active = routing.exclude_ru;
+                    let track = if active { LAVENDER } else { ROW };
+                    let knob = if active { BACKGROUND } else { MUTED };
+                    let x = if active {
+                        rect.right() - 11.0
+                    } else {
+                        rect.left() + 11.0
+                    };
+                    let outline = if response.has_focus() || response.hovered() {
+                        LAVENDER
+                    } else {
+                        BORDER
+                    };
+                    ui.painter().rect_filled(rect, 11.0, track);
+                    ui.painter().rect_stroke(
+                        rect,
+                        11.0,
+                        Stroke::new(1.0_f32, outline),
+                        StrokeKind::Inside,
+                    );
+                    ui.painter().circle_filled(pos2(x, rect.center().y), 7.0, knob);
+                });
+            });
+        });
+        ui.label(RichText::new(if routing.by_application {
+            "Доступно в режимах «Весь IPv4-трафик» и «Список CIDR»."
+        } else {
+            "IP из списка РФ идут напрямую. Большой список маршрутов может влиять на производительность и увеличить время подключения."
+        }).color(MUTED).size(12.0));
+    });
+    before != routing.exclude_ru
+}
+
 fn routing_fields(
     ui: &mut Ui,
     routing: &mut crate::profiles::Ipv4Routing,
@@ -1752,7 +2049,12 @@ fn routing_fields(
                 .color(MUTED),
         );
     } else {
-        ui.label(RichText::new("Через VPN пойдёт весь IPv4-трафик устройства.").color(MUTED));
+        let description = if routing.exclude_ru {
+            "VPN обслуживает весь IPv4-трафик за пределами исключённых диапазонов."
+        } else {
+            "Через VPN пойдёт весь IPv4-трафик устройства."
+        };
+        ui.label(RichText::new(description).color(MUTED));
     }
 }
 
@@ -1779,6 +2081,168 @@ pub(crate) fn form_field(ui: &mut Ui, label: &str, edit: egui::TextEdit<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ru_exclusion_shows_the_saved_state_when_editing_is_disabled() {
+        for enabled in [false, true] {
+            let ctx = egui::Context::default();
+            let mut routing = crate::profiles::Ipv4Routing {
+                exclude_ru: enabled,
+                ..Default::default()
+            };
+            let frame = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.add_enabled_ui(false, |ui| {
+                        assert!(!ru_exclusion_control(ui, &mut routing));
+                    });
+                });
+            });
+            let track = frame.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(track) if track.rect.size() == vec2(38.0, 22.0) => {
+                    Some(track.rect)
+                }
+                _ => None,
+            });
+            let knob = frame.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Circle(knob) if knob.radius == 7.0 => Some(knob.center),
+                _ => None,
+            });
+            assert_eq!(knob.unwrap().x > track.unwrap().center().x, enabled);
+            assert_eq!(routing.exclude_ru, enabled);
+        }
+    }
+
+    #[test]
+    fn update_dialog_shows_the_version_and_later_does_not_download() {
+        let ctx = egui::Context::default();
+        let client = Client {
+            directory: Ok(std::path::PathBuf::new()),
+            profiles: crate::Profiles::default(),
+            draft: crate::SavedProfile::default(),
+            local_port: "1080".into(),
+            password: String::new(),
+            tunnel: None,
+            active_profile: None,
+            disconnecting: None,
+            notices: Vec::new(),
+            confirming_delete: false,
+            editing: false,
+            keep_selection_on_insert: None,
+        };
+        let mut desktop = Desktop::new(&ctx, client).unwrap();
+        desktop.available_update = Some("v0.4.17".into());
+        let input = |events| egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 660.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input(vec![]), |ctx| desktop.update_dialog(ctx));
+        let frame = ctx.run(input(vec![]), |ctx| desktop.update_dialog(ctx));
+        let position = |label| {
+            frame.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => {
+                    Some(text.pos + text.galley.rect.center().to_vec2())
+                }
+                _ => None,
+            })
+        };
+        assert!(position("Версия 0.4.17").is_some());
+        assert!(position("Обновить").is_some());
+        let pos = position("Позже").unwrap();
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                input(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ctx| desktop.update_dialog(ctx),
+            );
+        }
+        assert!(desktop.available_update.is_none());
+        assert!(desktop.update.is_none());
+    }
+
+    #[test]
+    fn browsing_during_disconnect_keeps_the_active_profile_on_the_status_card() {
+        let ctx = egui::Context::default();
+        let temp = tempfile::tempdir().unwrap();
+        let home = crate::SavedProfile {
+            name: "Дом".into(),
+            connection: crate::tunnel::Profile {
+                server: "home.example".into(),
+                ..Default::default()
+            },
+            mode: Mode::SystemVpn,
+            ..Default::default()
+        };
+        let office = crate::SavedProfile {
+            name: "Офис".into(),
+            mode: Mode::Socks5,
+            ..Default::default()
+        };
+        let client = Client {
+            directory: Ok(temp.path().to_owned()),
+            profiles: crate::Profiles {
+                entries: vec![home.clone(), office.clone()],
+                selected: Some(0),
+            },
+            active_profile: Some(crate::ActiveProfile::from(&home)),
+            draft: home,
+            local_port: "1080".into(),
+            password: String::new(),
+            tunnel: None,
+            disconnecting: Some(thread::spawn(|| Ok(()))),
+            notices: Vec::new(),
+            confirming_delete: false,
+            editing: false,
+            keep_selection_on_insert: None,
+        };
+        let mut desktop = Desktop::new(&ctx, client).unwrap();
+        let input = |events| egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 660.0))),
+            events,
+            ..Default::default()
+        };
+        let frame = ctx.run(input(vec![]), |ctx| desktop.paint(ctx));
+        let office_row = frame
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(shape) if shape.rect.size() == vec2(208.0, 60.0) => {
+                    Some(shape.rect)
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.min.y.total_cmp(&b.min.y))
+            .unwrap();
+        let pos = office_row.center();
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                input(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ctx| desktop.paint(ctx),
+            );
+        }
+        assert_eq!(desktop.client.profiles.selected, Some(1));
+        assert!(desktop.client.draft == office);
+        let frame = ctx.run(input(vec![]), |ctx| desktop.paint(ctx));
+        assert!(frame.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Text(text) if text.galley.job.text == "Дом · home.example"
+        )));
+    }
 
     #[test]
     fn figma_assets_load_at_their_native_layout_sizes() {
@@ -1811,6 +2275,7 @@ mod tests {
             local_port: "1080".into(),
             password: String::new(),
             tunnel: None,
+            active_profile: None,
             disconnecting: None,
             notices: Vec::new(),
             confirming_delete: false,

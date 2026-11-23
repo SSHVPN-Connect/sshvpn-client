@@ -12,13 +12,14 @@ mod invite_ui;
 mod invites;
 mod profiles;
 mod running_apps;
+mod ru_ranges;
 mod tray;
 mod tunnel;
 mod tunnel_job;
 mod ui;
 mod updater;
 mod vpn;
-use profiles::{Authentication, Mode, Profiles, SavedProfile};
+use profiles::{Authentication, Ipv4Routing, Mode, Profiles, SavedProfile};
 use tunnel::Tunnel;
 use vpn::Vpn;
 
@@ -54,6 +55,26 @@ impl Connection {
     }
 }
 
+struct ActiveProfile {
+    name: String,
+    server: String,
+    mode: Mode,
+    socks_port: u16,
+    ipv4_routing: Ipv4Routing,
+}
+
+impl From<&SavedProfile> for ActiveProfile {
+    fn from(profile: &SavedProfile) -> Self {
+        Self {
+            name: profile.name.clone(),
+            server: profile.connection.server.clone(),
+            mode: profile.mode,
+            socks_port: profile.connection.socks_port,
+            ipv4_routing: profile.ipv4_routing.clone(),
+        }
+    }
+}
+
 struct Client {
     directory: Result<std::path::PathBuf, String>,
     profiles: Profiles,
@@ -61,6 +82,7 @@ struct Client {
     local_port: String,
     password: String,
     tunnel: Option<Connection>,
+    active_profile: Option<ActiveProfile>,
     disconnecting: Option<JoinHandle<std::io::Result<()>>>,
     notices: Vec<(String, bool)>,
     confirming_delete: bool,
@@ -94,6 +116,7 @@ impl Client {
             local_port: String::new(),
             password: String::new(),
             tunnel: None,
+            active_profile: None,
             disconnecting: None,
             notices,
             confirming_delete: false,
@@ -127,6 +150,7 @@ impl Client {
             local_port: String::new(),
             password: String::new(),
             tunnel: None,
+            active_profile: None,
             disconnecting: None,
             notices: Vec::new(),
             confirming_delete: false,
@@ -242,7 +266,7 @@ impl Client {
         Ok(())
     }
 
-    fn save_profile(&mut self) -> Result<(), String> {
+    fn prepared_profile(&self) -> Result<SavedProfile, String> {
         let mut profile = self.settings()?;
         if profile.name.is_empty() {
             return Err("Enter a profile name.".into());
@@ -256,6 +280,16 @@ impl Client {
                     format!("Windows could not protect the SSH credential: {error}")
                 })?);
         }
+        Ok(profile)
+    }
+
+    #[cfg(test)]
+    fn save_profile(&mut self) -> Result<(), String> {
+        let profile = self.prepared_profile()?;
+        self.save_prepared_profile(profile)
+    }
+
+    fn save_prepared_profile(&mut self, profile: SavedProfile) -> Result<(), String> {
         let mut updated = self.profiles.clone();
         if let Some(index) = updated.selected {
             updated.entries[index] = profile.clone();
@@ -299,6 +333,7 @@ impl Client {
                 .join()
                 .map_err(|_| "VPN cleanup worker stopped unexpectedly.".to_owned())
                 .and_then(|result| result.map_err(|error| error.to_string()));
+            self.active_profile = None;
             self.report(result, Some("Туннель отключён."));
         }
     }
@@ -351,6 +386,7 @@ impl Client {
 
     fn start_connection(&mut self, profile: SavedProfile, secret: String) -> Result<(), String> {
         let password_auth = profile.authentication == Authentication::Password;
+        let active_profile = ActiveProfile::from(&profile);
         self.tunnel = Some(match profile.mode {
             Mode::SystemVpn if profile.ipv4_routing.by_application => {
                 Connection::Apps(app_tunnel::AppTunnel::start(
@@ -365,11 +401,17 @@ impl Client {
                 password_auth,
                 secret,
                 profile.ipv4_routing.routes()?,
+                if profile.ipv4_routing.exclude_ru {
+                    Some(self.directory.as_ref().map_err(Clone::clone)?.clone())
+                } else {
+                    None
+                },
             )?),
             Mode::Socks5 => {
                 Connection::Socks(Tunnel::start(&profile.connection, password_auth, secret)?)
             }
         });
+        self.active_profile = Some(active_profile);
         Ok(())
     }
 
@@ -396,6 +438,7 @@ mod tests {
             local_port: "1080".into(),
             password: "in-memory secret".into(),
             tunnel: None,
+            active_profile: None,
             disconnecting: None,
             notices: Vec::new(),
             confirming_delete: false,
@@ -489,19 +532,24 @@ fn main() -> eframe::Result {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let instance_name = instance::Instance::name();
-    if instance::Instance::activate_existing(&instance_name) {
+    let mut args = std::env::args_os().skip(1);
+    let elevated_scope = args
+        .next()
+        .filter(|arg| arg == "--connect-elevated")
+        .and_then(|_| args.next())
+        .and_then(|arg| arg.to_str()?.parse::<u64>().ok())
+        .filter(|_| elevation::is_admin());
+    if elevated_scope.is_some() {
+        if !instance::Instance::wait_until_closed(
+            &instance_name,
+            std::time::Duration::from_secs(15),
+        ) {
+            return Ok(());
+        }
+    } else if instance::Instance::activate_existing(&instance_name) {
         return Ok(());
     }
     let debug_ui = cfg!(debug_assertions);
-    let elevation_notice = if debug_ui {
-        None
-    } else {
-        match elevation::request() {
-            Ok(elevation::Startup::Relaunched) => return Ok(()),
-            Ok(elevation::Startup::Elevated) => None,
-            Err(error) => Some((error, true)),
-        }
-    };
     let Some(instance) = instance::Instance::claim(&instance_name)
         .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
     else {
@@ -534,8 +582,18 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut client = Client::new();
-            if client.notices.is_empty() {
-                client.notices.extend(elevation_notice);
+            if let Some(scope) = elevated_scope {
+                let result = if elevation::profile_scope().ok() == Some(scope) {
+                    match client.profiles.selected {
+                        Some(index) if client.draft.mode == Mode::SystemVpn => {
+                            client.connect_profile(index)
+                        }
+                        _ => Err("Выберите сохранённый профиль System VPN.".into()),
+                    }
+                } else {
+                    Err("Windows запустила клиент под другой учётной записью. Для System VPN используйте права администратора в своей учётной записи.".into())
+                };
+                client.report(result, None);
             }
             let mut desktop = ui::Desktop::new(&cc.egui_ctx, client)?;
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};

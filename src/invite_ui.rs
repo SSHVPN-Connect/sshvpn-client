@@ -273,6 +273,7 @@ pub struct InviteUi {
     recipient: String,
     revoke_user: Option<(String, AccessChange)>,
     load_access: bool,
+    server_update_required: bool,
     ssh_secret: String,
     shared: bool,
 }
@@ -366,6 +367,9 @@ impl InviteUi {
                 .and_then(|result| result)
             {
                 Ok(result) => {
+                    if matches!(result, Completion::Access(..)) {
+                        self.server_update_required = false;
+                    }
                     match &result {
                         Completion::Shared(_) => {
                             client.report(Ok(()), Some("Приглашение создано."))
@@ -396,7 +400,11 @@ impl InviteUi {
                     self.result = Some(result);
                 }
                 Err(error) => {
-                    client.report(Err(error.clone()), None);
+                    if error == invites::UPDATE_REQUIRED {
+                        self.server_update_required = true;
+                    } else {
+                        client.report(Err(error.clone()), None);
+                    }
                     self.error = Some(error);
                 }
             }
@@ -445,7 +453,6 @@ impl InviteUi {
                 ui.spinner();
                 ui.label("Выполняется запрос по SSH…");
             } else {
-                let needs_update = self.error.as_deref() == Some(invites::UPDATE_REQUIRED);
                 match &self.result {
                     Some(Completion::Shared(invite)) => {
                         ui.add_space(8.0);
@@ -578,7 +585,11 @@ impl InviteUi {
                     }
                 }
                 if operation == Operation::Manage {
-                    if self.error.is_some() {
+                    if self
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error != invites::UPDATE_REQUIRED)
+                    {
                         crate::ui::field(
                             ui,
                             "Пароль SSH или фраза ключа",
@@ -588,8 +599,12 @@ impl InviteUi {
                         );
                         ui.add_space(6.0);
                     }
-                    if needs_update {
-                        update = crate::ui::pill(ui, "Обновить сервер", 154.0, true).clicked();
+                    if self.server_update_required {
+                        update = ui
+                            .add_enabled_ui(self.worker.is_none(), |ui| {
+                                crate::ui::pill(ui, "Обновить сервер", 154.0, true).clicked()
+                            })
+                            .inner;
                     } else if self.result.is_none() && self.error.is_none() {
                         ui.label("Загружаем приглашения…");
                     }
@@ -691,7 +706,7 @@ impl InviteUi {
                         invites::issue(profile, secret, recipient).map(Completion::Shared)
                     } else if update {
                         invites::update_and_list(&profile, secret)
-                            .map(|entries| Completion::Access(entries, None))
+                            .map(|entries| Completion::Access(entries, Some("Сервер обновлён.")))
                     } else {
                         let message = if let Some((user, change)) = user {
                             invites::change_access(&profile, secret.clone(), user, change)?;

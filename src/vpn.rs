@@ -5,69 +5,37 @@ use std::env;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    CreateIpForwardEntry2, DeleteIpForwardEntry2, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
+};
+use windows_sys::Win32::Networking::WinSock::{
+    AF_INET, IN_ADDR, IN_ADDR_0, MIB_IPPROTO_NETMGMT, SOCKADDR_IN, SOCKADDR_INET,
+};
 
 const MTU: usize = 1420;
 const ADAPTER_GUID: u128 = 0x9648bb2f_098b_4d6c_8f35_7c011cdf8651;
-const INSTALLER: &str = include_str!("../install-server.sh");
-const INVITATION_INSTALLER: &str = crate::invites::INSTALLER;
 const HELLO: &[u8; 8] = b"SSHVPN1\n";
 const MULTI_HELLO: &[u8; 8] = b"SSHVPN2\n";
-const INSTALL_REQUEST: &[u8; 8] = b"SSHVPN0\n";
-
-const VPN_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-vpn ] || [ ! -f /var/lib/ssh-tunnel-vpn/installed-v3 ] || [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]"#;
-const INVITATIONS_REQUIRED: &str = r#"[ ! -x /usr/local/libexec/ssh-tunnel-invite ] || [ ! -x /usr/local/libexec/ssh-tunnel-invite-session ] || [ ! -d /var/lib/ssh-tunnel-invites/records ] || [ ! -f /var/lib/ssh-tunnel-invites/installed-v8 ] || [ ! -r /etc/ssh/ssh-tunnel-invites.conf ] || [ ! -r /etc/sudoers.d/ssh-tunnel-invites ] || ! grep -Fxq 'Include /etc/ssh/ssh-tunnel-invites.conf' /etc/ssh/sshd_config"#;
 const INVITED_VPN_COMMAND: &str = "ssh-tunnel-vpn-v2";
+const OWNER_VPN_COMMAND: &str = r#"set -eu
+if [ "$(id -u)" -ne 0 ]; then
+    echo 'System VPN requires an SSH login as root.' >&2
+    exit 1
+fi
+exec /usr/local/libexec/ssh-tunnel-vpn --multi"#;
 
 fn is_invited(profile: &Profile) -> bool {
     profile.host_key.is_some() && crate::invites::valid_user(&profile.user)
 }
 
-fn server_installer() -> String {
-    format!(
-        "set -eu\nif {VPN_REQUIRED}; then\n(\n{INSTALLER}\n)\nfi\nif {INVITATIONS_REQUIRED}; then\n(\n{INVITATION_INSTALLER}\n)\nfi\n"
-    ).replace("\r\n", "\n")
-}
-
-fn server_command(installer_size: usize) -> String {
-    format!(
-        r#"set -eu
-handler=/usr/local/libexec/ssh-tunnel-vpn
-if [ "$(id -u)" -ne 0 ]; then
-    echo 'System VPN requires an SSH login as root.' >&2
-    exit 1
-fi
-if {VPN_REQUIRED} || {INVITATIONS_REQUIRED}; then
-    (
-        umask 077
-        printf 'SSHVPN0\n'
-        script=$(mktemp /tmp/ssh-tunnel-install.XXXXXX)
-        trap 'rm -f "$script"' EXIT
-        head -c {installer_size} > "$script"
-        if [ "$(wc -c < "$script")" -ne {installer_size} ]; then
-            echo 'Server installer transfer was interrupted.' >&2
-            exit 1
-        fi
-        flock -w 120 9
-        sh "$script" </dev/null >&2
-    ) 9>/run/ssh-tunnel-vpn-install.lock
-fi
-exec "$handler" --multi"#
-    )
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Greeting {
-    Install,
-    Ready(Ipv4Addr),
-}
-
 enum Status {
-    Installing,
+    ConfiguringAdapter,
     Ready,
 }
 
@@ -77,7 +45,7 @@ pub struct Vpn {
     status: mpsc::Receiver<Result<Status, String>>,
     worker: Option<JoinHandle<io::Result<()>>>,
     ready: bool,
-    installing: bool,
+    configuring_adapter: bool,
 }
 
 impl Vpn {
@@ -86,6 +54,7 @@ impl Vpn {
         password_auth: bool,
         password: String,
         split: Option<Vec<Ipv4Prefix>>,
+        ru_cache: Option<PathBuf>,
     ) -> Result<Self, String> {
         let dll = env::current_exe()
             .map_err(|e| e.to_string())?
@@ -113,6 +82,17 @@ impl Vpn {
                         }
                         ",
                     )?;
+                    let prefixes = if let Some(directory) = &ru_cache {
+                        let regions = crate::ru_ranges::load(directory)?;
+                        if let Some(routes) = &split {
+                            regions.validate_included(routes)?;
+                            None
+                        } else {
+                            Some(regions.non_ru_prefixes())
+                        }
+                    } else {
+                        None
+                    };
                     let ip = (profile.server.as_str(), 22)
                         .to_socket_addrs()
                         .map_err(|e| e.to_string())?
@@ -134,11 +114,11 @@ impl Vpn {
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    let (server_command, installer) = if is_invited(&profile) {
-                        (INVITED_VPN_COMMAND.to_owned(), None)
+                    let invited = is_invited(&profile);
+                    let server_command = if invited {
+                        INVITED_VPN_COMMAND
                     } else {
-                        let installer = server_installer();
-                        (server_command(installer.len()), Some(installer))
+                        OWNER_VPN_COMMAND
                     };
                     command.stdin(Stdio::piped()).stdout(Stdio::piped()).args([
                         "-4",
@@ -148,10 +128,10 @@ impl Vpn {
                         "LogLevel=ERROR",
                         "--",
                         &ip.to_string(),
-                        &server_command,
+                        server_command,
                     ]);
                     let mut ssh = job.spawn(&mut command).map_err(|e| e.to_string())?;
-                    let mut stdin = ssh.stdin.take().expect("piped SSH stdin");
+                    let stdin = ssh.stdin.take().expect("piped SSH stdin");
                     let stdout = ssh.stdout.take().expect("piped SSH stdout");
                     *process = Some(ssh);
                     drop(process);
@@ -159,31 +139,19 @@ impl Vpn {
                     let (hello_tx, hello_rx) = mpsc::channel();
                     let (frames_tx, frames_rx) = mpsc::sync_channel(128);
                     thread::spawn(move || read_packets(stdout, hello_tx, frames_tx));
-                    let first = wait_for_greeting(&hello_rx, Duration::from_secs(22))
+                    let client_address = wait_for_greeting(&hello_rx, Duration::from_secs(22))
                         .map_err(|error| {
                             let error = ssh_error(&mut diagnostics, error);
-                            if installer.is_none() {
-                                format!("Подключение по приглашению не запустилось. Попросите владельца подключиться обновлённым клиентом в режиме System VPN (IPv4).\n{error}")
+                            if invited {
+                                format!("Подключение по приглашению не запустилось. Попросите владельца проверить обновление сервера во вкладке «Пользователи».\n{error}")
                             } else {
-                                error
+                                format!("Подключение VPN не запустилось. Если серверу требуется настройка, откройте «Пользователи» → «Обновить сервер».\n{error}")
                             }
                         })?;
-                    let greeting = if first == Greeting::Install {
-                        let installer = installer.ok_or("Сервер запросил установку для профиля по приглашению.")?;
-                        tx.send(Ok(Status::Installing)).map_err(|e| e.to_string())?;
-                        stdin.write_all(installer.as_bytes())
-                            .map_err(|e| ssh_error(&mut diagnostics, format!("Could not upload server installer: {e}")))?;
-                        wait_for_greeting(&hello_rx, Duration::from_secs(600))
-                            .map_err(|error| format!("Server installation failed: {}", ssh_error(&mut diagnostics, error)))?
-                    } else {
-                        first
-                    };
-                    let Greeting::Ready(client_address) = greeting else {
-                        return Err("Unexpected server installer response.".into());
-                    };
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Ok(());
                     }
+                    tx.send(Ok(Status::ConfiguringAdapter)).map_err(|e| e.to_string())?;
                     // The crate gives adapter-creation failures a generic message.
                     unsafe { windows_sys::Win32::Foundation::SetLastError(0) };
                     let adapter_result =
@@ -205,7 +173,7 @@ impl Vpn {
                             .map_err(|e| e.to_string())?,
                     );
                     let mut routes = Routes::new(index, ip);
-                    routes.apply(client_address, split.as_deref())?;
+                    routes.apply(client_address, split.as_deref(), prefixes.as_deref(), &worker_cancelled)?;
                     worker_ready = true;
                     tx.send(Ok(Status::Ready)).map_err(|e| e.to_string())?;
                     let result = forward(&session, stdin, &frames_rx, &worker_cancelled);
@@ -236,7 +204,7 @@ impl Vpn {
             status,
             worker: Some(worker),
             ready: false,
-            installing: false,
+            configuring_adapter: false,
         })
     }
 
@@ -244,9 +212,11 @@ impl Vpn {
         loop {
             match self.status.try_recv() {
                 Ok(event) => match event? {
-                    Status::Installing => self.installing = true,
+                    Status::ConfiguringAdapter => {
+                        self.configuring_adapter = true;
+                    }
                     Status::Ready => {
-                        self.installing = false;
+                        self.configuring_adapter = false;
                         self.ready = true;
                     }
                 },
@@ -260,8 +230,8 @@ impl Vpn {
         self.ready
     }
 
-    pub fn is_installing(&self) -> bool {
-        self.installing
+    pub fn is_configuring_adapter(&self) -> bool {
+        self.configuring_adapter
     }
 
     pub fn stop(&mut self) -> io::Result<()> {
@@ -295,20 +265,20 @@ impl Drop for Vpn {
 }
 
 fn wait_for_greeting(
-    hello: &mpsc::Receiver<io::Result<Greeting>>,
+    hello: &mpsc::Receiver<io::Result<Ipv4Addr>>,
     timeout: Duration,
-) -> Result<Greeting, String> {
+) -> Result<Ipv4Addr, String> {
     hello
         .recv_timeout(timeout)
         .map_err(|error| format!("VPN handshake: {error}"))?
         .map_err(|error| error.to_string())
 }
 
-fn read_greeting(reader: &mut impl Read) -> io::Result<Greeting> {
+fn read_greeting(reader: &mut impl Read) -> io::Result<Ipv4Addr> {
     let mut greeting = [0; HELLO.len()];
     reader.read_exact(&mut greeting)?;
     match &greeting {
-        HELLO => Ok(Greeting::Ready(Ipv4Addr::new(172, 31, 255, 2))),
+        HELLO => Ok(Ipv4Addr::new(172, 31, 255, 2)),
         MULTI_HELLO => {
             let mut address = [0; 4];
             reader.read_exact(&mut address)?;
@@ -317,31 +287,22 @@ fn read_greeting(reader: &mut impl Read) -> io::Result<Greeting> {
                     "Invalid IPv4 address assigned by the VPN server.",
                 ));
             }
-            Ok(Greeting::Ready(address.into()))
+            Ok(address.into())
         }
-        INSTALL_REQUEST => Ok(Greeting::Install),
         _ => Err(io::Error::other("Unexpected VPN server handshake.")),
     }
 }
 
 fn read_packets(
     pipe: impl Read,
-    hello: mpsc::Sender<io::Result<Greeting>>,
+    hello: mpsc::Sender<io::Result<Ipv4Addr>>,
     frames: mpsc::SyncSender<io::Result<Vec<u8>>>,
 ) {
     let mut reader = BufReader::new(pipe);
     let first = read_greeting(&mut reader);
-    let requested_install = matches!(&first, Ok(Greeting::Install));
     let valid = first.is_ok();
     if hello.send(first).is_err() || !valid {
         return;
-    }
-    if requested_install {
-        let second = read_greeting(&mut reader);
-        let ready = matches!(&second, Ok(Greeting::Ready(_)));
-        if hello.send(second).is_err() || !ready {
-            return;
-        }
     }
     loop {
         let result = (|| {
@@ -444,6 +405,21 @@ struct Routes {
     index: u32,
     server: Ipv4Addr,
     bypass: Option<(u32, Ipv4Addr, u32)>,
+    filtered: Vec<MIB_IPFORWARD_ROW2>,
+}
+
+fn ipv4_socket(address: Ipv4Addr) -> SOCKADDR_INET {
+    SOCKADDR_INET {
+        Ipv4: SOCKADDR_IN {
+            sin_family: AF_INET,
+            sin_addr: IN_ADDR {
+                S_un: IN_ADDR_0 {
+                    S_addr: u32::from_ne_bytes(address.octets()),
+                },
+            },
+            ..Default::default()
+        },
+    }
 }
 
 impl Routes {
@@ -452,6 +428,7 @@ impl Routes {
             index,
             server,
             bypass: None,
+            filtered: Vec::new(),
         }
     }
 
@@ -483,6 +460,8 @@ impl Routes {
         &mut self,
         client_address: Ipv4Addr,
         split: Option<&[Ipv4Prefix]>,
+        filtered: Option<&[(Ipv4Addr, u8)]>,
+        cancelled: &AtomicBool,
     ) -> Result<(), String> {
         let index = self.index;
         if split.is_none_or(|routes| routes.iter().any(|route| route.contains(self.server))) {
@@ -502,17 +481,52 @@ impl Routes {
         } else {
             script.push_str(&format!(r"
             Set-DnsClientServerAddress -InterfaceIndex {index} -ServerAddresses @('1.1.1.1','1.0.0.1');
-            New-NetRoute -InterfaceIndex {index} -DestinationPrefix '0.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;
-            New-NetRoute -InterfaceIndex {index} -DestinationPrefix '128.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;
             New-NetIPAddress -InterfaceIndex {index} -IPAddress 'fd53:5353:4856::2' -PrefixLength 64 -PolicyStore ActiveStore | Out-Null;
             New-NetRoute -InterfaceIndex {index} -DestinationPrefix '2000::/3' -NextHop '::' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;
             "));
+            if filtered.is_none() {
+                script.push_str(&format!(r"
+                New-NetRoute -InterfaceIndex {index} -DestinationPrefix '0.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;
+                New-NetRoute -InterfaceIndex {index} -DestinationPrefix '128.0.0.0/1' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null;
+                "));
+            }
         }
         powershell(&script)?;
+        if let Some(prefixes) = filtered {
+            for &(address, length) in prefixes {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("Подключение отменено.".into());
+                }
+                if length == 32 && address == self.server {
+                    continue;
+                }
+                let mut row = MIB_IPFORWARD_ROW2::default();
+                // Windows supplies the route lifetimes and other default fields.
+                unsafe { InitializeIpForwardEntry(&mut row) };
+                row.InterfaceIndex = index;
+                row.DestinationPrefix.Prefix = ipv4_socket(address);
+                row.DestinationPrefix.PrefixLength = length;
+                row.NextHop = ipv4_socket(Ipv4Addr::UNSPECIFIED);
+                row.Metric = 1;
+                row.Protocol = MIB_IPPROTO_NETMGMT;
+                let result = unsafe { CreateIpForwardEntry2(&row) };
+                if result != 0 {
+                    return Err(format!(
+                        "Не удалось добавить маршрут {address}/{length}: {}",
+                        io::Error::from_raw_os_error(result as i32)
+                    ));
+                }
+                self.filtered.push(row);
+            }
+        }
         Ok(())
     }
 
     fn remove(&mut self) -> Result<(), String> {
+        for row in self.filtered.drain(..).rev() {
+            // The adapter also releases its routes when it is closed.
+            unsafe { DeleteIpForwardEntry2(&row) };
+        }
         if let Some((index, hop, metric)) = self.bypass {
             let server = self.server;
             powershell(&format!(
@@ -572,29 +586,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn server_bootstrap_checks_both_installers_independently() {
-        let installer = server_installer();
-        assert!(!installer.contains('\r'));
-        assert!(installer.contains(&format!("if {VPN_REQUIRED}; then\n(")));
-        assert!(installer.contains(&format!("if {INVITATIONS_REQUIRED}; then\n(")));
-        assert!(installer.contains("/var/lib/ssh-tunnel-invites/installed-v8"));
-        assert!(installer.contains("/var/lib/ssh-tunnel-vpn/installed-v3"));
-        let command = server_command(installer.len());
-        assert!(command.contains(&format!(
-            "if {VPN_REQUIRED} || {INVITATIONS_REQUIRED}; then"
-        )));
-        assert!(command.contains(&format!("head -c {}", installer.len())));
-        assert!(command.contains(r#"exec "$handler" --multi"#));
-    }
-
-    #[test]
-    fn vpn_stream_accepts_optional_install_request_before_packet_frames() {
-        for install in [false, true] {
+    fn vpn_stream_starts_with_a_packet_greeting() {
+        for multi_session in [false, true] {
             let mut stream = Vec::new();
-            if install {
-                stream.extend_from_slice(INSTALL_REQUEST);
-            }
-            let address = if install {
+            let address = if multi_session {
                 stream.extend_from_slice(MULTI_HELLO);
                 stream.extend_from_slice(&[172, 31, 252, 6]);
                 Ipv4Addr::new(172, 31, 252, 6)
@@ -611,15 +606,14 @@ mod tests {
 
             read_packets(stream.as_slice(), greetings, frames);
 
-            if install {
-                assert!(matches!(
-                    received.recv().unwrap().unwrap(),
-                    Greeting::Install
-                ));
-            }
-            assert_eq!(received.recv().unwrap().unwrap(), Greeting::Ready(address));
+            assert_eq!(received.recv().unwrap().unwrap(), address);
             assert_eq!(packets.recv().unwrap().unwrap(), packet);
         }
+    }
+
+    #[test]
+    fn vpn_rejects_the_retired_server_install_request() {
+        assert!(read_greeting(&mut b"SSHVPN0\n".as_slice()).is_err());
     }
 
     #[test]

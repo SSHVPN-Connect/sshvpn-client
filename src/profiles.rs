@@ -24,6 +24,8 @@ pub struct Ipv4Routing {
     #[serde(default)]
     pub by_application: bool,
     #[serde(default)]
+    pub exclude_ru: bool,
+    #[serde(default)]
     pub applications: Vec<PathBuf>,
 }
 
@@ -34,6 +36,18 @@ pub struct Ipv4Prefix {
 }
 
 impl Ipv4Prefix {
+    pub fn parse(entry: &str) -> Option<Self> {
+        let (address, length) = entry.split_once('/').unwrap_or((entry, "32"));
+        let address = address.parse::<Ipv4Addr>().ok()?;
+        let length = length.parse::<u8>().ok().filter(|n| (1..=32).contains(n))?;
+        let network = Ipv4Addr::from(u32::from(address) & (u32::MAX << (32 - length)));
+        Some(Self { network, length })
+    }
+
+    pub fn parts(self) -> (Ipv4Addr, u8) {
+        (self.network, self.length)
+    }
+
     pub fn contains(self, address: Ipv4Addr) -> bool {
         let mask = u32::MAX << (32 - self.length);
         u32::from(address) & mask == u32::from(self.network)
@@ -97,13 +111,7 @@ impl Ipv4Routing {
             if entry.is_empty() {
                 continue;
             }
-            let parsed = entry.split_once('/').and_then(|(address, length)| {
-                let address = address.parse::<Ipv4Addr>().ok()?;
-                let length = length.parse::<u8>().ok().filter(|n| (1..=32).contains(n))?;
-                let network = Ipv4Addr::from(u32::from(address) & (u32::MAX << (32 - length)));
-                Some(Ipv4Prefix { network, length })
-            });
-            let prefix = parsed.ok_or_else(|| {
+            let prefix = Ipv4Prefix::parse(entry).ok_or_else(|| {
                 format!("Неверный IPv4 CIDR: {entry}. Используйте префикс от /1 до /32.")
             })?;
             if !routes.contains(&prefix) {

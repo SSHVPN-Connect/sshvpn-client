@@ -28,10 +28,14 @@ for package in openssh-server iproute2 nftables iptables conntrack python3; do
 done
 
 if [ "$#" -gt 0 ]; then
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends "$@"
+    if command -v sshvpn_setup_stage >/dev/null; then sshvpn_setup_stage p; fi
+    apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+    if command -v sshvpn_setup_stage >/dev/null; then sshvpn_setup_stage d; fi
+    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 \
+        -o Acquire::https::Timeout=15 -o DPkg::Lock::Timeout=120 install -y --no-install-recommends "$@"
 fi
 
+if command -v sshvpn_setup_stage >/dev/null; then sshvpn_setup_stage v; fi
 dpkg-query -W -f='${Package} ${Version}\n' openssh-server iproute2 nftables iptables conntrack python3
 if [ ! -c /dev/net/tun ]; then
     printf '%s\n' 'Packages are installed. The kernel or hosting provider must enable /dev/net/tun.' >&2

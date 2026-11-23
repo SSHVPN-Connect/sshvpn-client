@@ -2,7 +2,14 @@ use std::{env, io, path::PathBuf, process::Command};
 
 const ASSET: &str = "ssh-tunnel-setup-x64.exe";
 
-pub fn prepare() -> Result<Option<PathBuf>, String> {
+pub fn check() -> Result<Option<String>, String> {
+    let result = crate::vpn::powershell(&update_script(env!("CARGO_PKG_VERSION"), None))
+        .map_err(|error| format!("Не удалось проверить обновления: {error}"))?;
+    let version = result.trim();
+    Ok((!version.is_empty()).then(|| version.to_owned()))
+}
+
+pub fn prepare(version: &str) -> Result<PathBuf, String> {
     let program_files = env::var_os("ProgramW6432")
         .or_else(|| env::var_os("ProgramFiles"))
         .ok_or("Не найдена папка Program Files.")?;
@@ -20,24 +27,28 @@ pub fn prepare() -> Result<Option<PathBuf>, String> {
         );
     }
 
-    let staging = tempfile::NamedTempFile::new_in(&installed)
+    let update_dir = crate::Profiles::directory().map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&update_dir).map_err(|error| error.to_string())?;
+    let staging = tempfile::NamedTempFile::new_in(&update_dir)
         .map_err(|error| format!("Не удалось подготовить обновление: {error}"))?;
     let temporary = staging.into_temp_path();
-    let result = crate::vpn::powershell(&download_script(&temporary, env!("CARGO_PKG_VERSION")))
-        .map_err(|error| format!("Не удалось обновить приложение: {error}"))?;
-    if result.trim().is_empty() {
-        return Ok(None);
+    let result = crate::vpn::powershell(&update_script(
+        env!("CARGO_PKG_VERSION"),
+        Some((&temporary, version)),
+    ))
+    .map_err(|error| format!("Не удалось обновить приложение: {error}"))?;
+    if result.trim() != version {
+        return Err("Версия релиза изменилась. Повторите проверку обновлений.".into());
     }
-    let pending = installed.join("pending-update.exe");
+    let pending = update_dir.join("pending-update.exe");
     temporary
         .persist(&pending)
         .map_err(|error| format!("Не удалось сохранить установщик: {error}"))?;
-    Ok(Some(pending))
+    Ok(pending)
 }
 
-fn download_script(path: &std::path::Path, current: &str) -> String {
-    let path = path.to_string_lossy().replace('\'', "''");
-    format!(
+fn update_script(current: &str, download: Option<(&std::path::Path, &str)>) -> String {
+    let mut script = format!(
         r#"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $headers = @{{ 'User-Agent' = 'SSH-Tunnel'; Accept = 'application/vnd.github+json' }}
@@ -80,6 +91,19 @@ fn download_script(path: &std::path::Path, current: &str) -> String {
             $asset.digest -cnotmatch '^sha256:[0-9a-f]{{64}}$' -or $asset.size -le 0 -or $asset.size -gt 52428800) {{
             throw 'The release is missing a verifiable Windows installer.'
         }}
+        "#,
+    );
+    let Some((path, version)) = download else {
+        script.push_str("[Console]::WriteLine($release.tag_name)\n");
+        return script;
+    };
+    let path = path.to_string_lossy().replace('\'', "''");
+    let version = version.replace('\'', "''");
+    script.push_str(&format!(
+        r#"
+        if ($release.tag_name -cne '{version}') {{
+            throw 'Версия релиза изменилась. Повторите проверку обновлений.'
+        }}
         $ProgressPreference = 'SilentlyContinue'
         try {{
             if ($authenticated) {{
@@ -110,14 +134,21 @@ fn download_script(path: &std::path::Path, current: &str) -> String {
         }}
         [Console]::WriteLine($release.tag_name)
         "#,
-    )
+    ));
+    script
 }
 
 pub fn launch(installer: PathBuf) -> io::Result<()> {
-    Command::new(installer)
+    let result = Command::new(&installer)
         .args(["/SILENT", "/NORESTART", "/RESTARTAPP=1"])
-        .spawn()
-        .map(|_| ())
+        .spawn();
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(740) => {
+            crate::elevation::run_as_admin(&installer, "/SILENT /NORESTART /RESTARTAPP=1")
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -151,22 +182,33 @@ mod tests {
                 [IO.File]::WriteAllText($OutFile, 'hello')
             }
         "#;
-        let script = |current| {
+        let script = |current, download| {
             format!(
                 "$env:SSH_TUNNEL_GITHUB_TOKEN = 'test-token'\n{mock}\n{}",
-                download_script(&target, current)
+                update_script(current, download)
             )
         };
-        assert!(crate::vpn::powershell(&script("0.3.0"))
+        assert!(crate::vpn::powershell(&script("0.3.0", None))
             .unwrap()
             .trim()
             .is_empty());
         assert!(!target.exists());
+        let previous_release = script("0.4.20", None).replace("v0.3.0", "v0.4.15");
+        assert!(crate::vpn::powershell(&previous_release).unwrap().trim().is_empty());
+        let future_release = script("0.4.20", None).replace("v0.3.0", "v0.4.21");
+        assert_eq!(crate::vpn::powershell(&future_release).unwrap().trim(), "v0.4.21");
         assert_eq!(
-            crate::vpn::powershell(&script("0.2.0")).unwrap().trim(),
+            crate::vpn::powershell(&script("0.2.0", None)).unwrap().trim(),
             "v0.3.0"
         );
-        let corrupted = script("0.2.0").replace("'hello'", "'jello'");
+        assert!(!target.exists());
+        assert!(crate::vpn::powershell(&script("0.2.0", Some((&target, "v0.2.9"))))
+            .unwrap_err()
+            .contains("Версия релиза изменилась"));
+        assert!(!target.exists());
+        let download = script("0.2.0", Some((&target, "v0.3.0")));
+        assert_eq!(crate::vpn::powershell(&download).unwrap().trim(), "v0.3.0");
+        let corrupted = download.replace("'hello'", "'jello'");
         assert!(crate::vpn::powershell(&corrupted)
             .unwrap_err()
             .contains("SHA-256"));
