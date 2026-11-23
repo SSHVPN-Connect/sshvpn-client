@@ -820,6 +820,13 @@ impl Desktop {
                     Err("Для сохранения дождитесь загрузки списка IPv4 РФ.".into())
                 }
                 Some(Ok(ranges)) => {
+                    if ranges.from_ipdeny {
+                        ui.label(
+                            RichText::new("Используется резервный список IPv4 от IPdeny.")
+                                .color(MUTED)
+                                .size(12.0),
+                        );
+                    }
                     let conflict = routing
                         .routes()
                         .ok()
