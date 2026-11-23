@@ -1,5 +1,7 @@
 # SSH-Tunnel
 
+<img src="assets/ssh-tunnel-logo.png" width="72" height="72" alt="SSH Tunnel logo">
+
 Клиент для Windows на Rust. Поднимает системный IPv4-туннель через SSH
 на порту 22 или локальный SOCKS5-прокси. В обоих режимах можно войти
 по паролю или SSH-ключу. Подключение работает в фоне.
