@@ -32,7 +32,7 @@ sudo sh install-server.sh
 
 ## 2. Установить клиент Windows x64
 
-Скачай `ssh-tunnel-setup-x64.exe` из [последнего релиза](https://github.com/d1llr/sshvpn/releases/latest).
+Скачай `ssh-tunnel-setup-x64.exe` из [последнего релиза](https://github.com/SSHVPN-Connect/sshvpn-client/releases/latest).
 Установщик добавит ярлыки SSH Tunnel на рабочий стол и в меню «Пуск» и установит Wintun вместе с приложением.
 В Windows должен быть включён **OpenSSH Client**.
 
@@ -44,7 +44,7 @@ SHA-256 установщика, запустит обновление и зак�
 
 Для закрытого репозитория добавь пользовательскую переменную Windows
 `SSH_TUNNEL_GITHUB_TOKEN` с fine-grained токеном GitHub, ограниченным
-репозиторием `d1llr/sshvpn` и разрешением **Contents: Read-only**.
+репозиторием `SSHVPN-Connect/sshvpn-client` и разрешением **Contents: Read-only**.
 Перезапусти клиент после настройки переменной. Каждый пользователь
 закрытых релизов должен иметь собственный доступ к репозиторию.
 
@@ -54,8 +54,8 @@ SHA-256 установщика, запустит обновление и зак�
 **OpenSSH Client** в Windows. Выполни в PowerShell:
 
 ```powershell
-git clone https://github.com/d1llr/sshvpn.git
-cd sshvpn
+git clone https://github.com/SSHVPN-Connect/sshvpn-client.git
+cd sshvpn-client
 rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
 cargo +stable-x86_64-pc-windows-gnu build --release --locked
 ```
