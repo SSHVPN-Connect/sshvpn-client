@@ -1,9 +1,9 @@
 use crate::profiles::Ipv4Prefix;
 use crate::tunnel::{ssh_command, ssh_error, system_program, Profile};
+use crate::tunnel_job::TunnelJob;
 use std::env;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,32 +79,6 @@ pub struct Vpn {
     installing: bool,
 }
 
-fn vpn_ssh_job() -> io::Result<OwnedHandle> {
-    use windows_sys::Win32::System::JobObjects::{
-        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    };
-    let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-    if raw.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    let job = unsafe { OwnedHandle::from_raw_handle(raw) };
-    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    let configured = unsafe {
-        SetInformationJobObject(
-            job.as_raw_handle(),
-            JobObjectExtendedLimitInformation,
-            std::ptr::from_ref(&limits).cast(),
-            std::mem::size_of_val(&limits) as u32,
-        )
-    };
-    if configured == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(job)
-}
-
 impl Vpn {
     pub fn start(
         profile: Profile,
@@ -125,8 +99,7 @@ impl Vpn {
         let (tx, status) = mpsc::channel();
         let worker = thread::Builder::new()
             .spawn(move || {
-                use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-                let job = vpn_ssh_job();
+                let job = TunnelJob::new();
                 let mut worker_ready = false;
                 let result = (|| {
                     let job = job.as_ref().map_err(|error| format!("Could not configure VPN SSH process cleanup: {error}"))?;
@@ -176,13 +149,7 @@ impl Vpn {
                         &ip.to_string(),
                         &server_command,
                     ]);
-                    let mut ssh = command.spawn().map_err(|e| e.to_string())?;
-                    if unsafe { AssignProcessToJobObject(job.as_raw_handle(), ssh.as_raw_handle()) } == 0 {
-                        let error = io::Error::last_os_error();
-                        let _ = ssh.kill();
-                        let _ = ssh.wait();
-                        return Err(format!("Could not configure VPN SSH process cleanup: {error}"));
-                    }
+                    let mut ssh = job.spawn(&mut command).map_err(|e| e.to_string())?;
                     let mut stdin = ssh.stdin.take().expect("piped SSH stdin");
                     let stdout = ssh.stdout.take().expect("piped SSH stdout");
                     *process = Some(ssh);

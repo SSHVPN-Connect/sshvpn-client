@@ -14,6 +14,7 @@ mod profiles;
 mod running_apps;
 mod tray;
 mod tunnel;
+mod tunnel_job;
 mod ui;
 mod updater;
 mod vpn;

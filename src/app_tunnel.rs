@@ -66,14 +66,17 @@ impl AppTunnel {
     pub fn poll(&mut self) -> Result<(), String> {
         self.ssh.poll()?;
         if self.ssh.is_ready() && self.engine.is_none() {
-            let mut engine = Command::new(&self.executable)
+            let mut command = Command::new(&self.executable);
+            command
                 .creation_flags(0x0800_0000)
                 .args(["run", "--disable-color", "-c"])
                 .arg(self.config.path())
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
+                .stderr(Stdio::piped());
+            let mut engine = self
+                .ssh
+                .spawn_companion(&mut command)
                 .map_err(|error| format!("Не удалось запустить sing-box: {error}"))?;
             let (tx, rx) = mpsc::sync_channel(128);
             forward_logs(engine.stdout.take().expect("piped stdout"), tx.clone());

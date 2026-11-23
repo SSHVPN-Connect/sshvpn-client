@@ -12,9 +12,6 @@ use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::System::Threading::{
     CreateEventExW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
-};
 
 const SYNCHRONIZE: u32 = 0x0010_0000;
 
@@ -94,10 +91,7 @@ impl Instance {
             while unsafe { WaitForSingleObject(event.as_raw_handle(), INFINITE) } == WAIT_OBJECT_0
                 && !stopped.load(Ordering::Acquire)
             {
-                unsafe {
-                    ShowWindowAsync(hwnd as _, SW_RESTORE);
-                    SetForegroundWindow(hwnd as _);
-                }
+                crate::tray::restore(hwnd);
                 ctx.request_repaint();
             }
         })?;

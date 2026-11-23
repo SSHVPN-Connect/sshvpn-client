@@ -7,7 +7,6 @@ use tray_icon::{
 };
 
 pub enum Action {
-    Show,
     Quit,
 }
 
@@ -59,15 +58,12 @@ impl Tray {
         let show_id = show.id().clone();
         let quit_id = quit.id().clone();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            let action = if event.id == show_id {
-                Action::Show
-            } else if event.id == quit_id {
-                Action::Quit
-            } else {
+            if event.id == quit_id {
+                let _ = menu_events.send(Action::Quit);
+            } else if event.id != show_id {
                 return;
-            };
+            }
             restore(hwnd);
-            let _ = menu_events.send(action);
             ctx_menu.request_repaint();
         }));
         let ctx = ctx.clone();
@@ -80,7 +76,6 @@ impl Tray {
                 }
             ) {
                 restore(hwnd);
-                let _ = events.send(Action::Show);
                 ctx.request_repaint();
             }
         }));
@@ -95,10 +90,29 @@ impl Tray {
     }
 }
 
-fn restore(hwnd: isize) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_RESTORE};
-    // The tray belongs to this window and is dropped before the window is destroyed.
-    unsafe { ShowWindowAsync(hwnd as _, SW_RESTORE) };
+pub(crate) fn restore(hwnd: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SetForegroundWindow, ShowWindowAsync, SW_RESTORE, SW_SHOW,
+    };
+    let hwnd = hwnd as _;
+    unsafe {
+        let command = if IsIconic(hwnd) != 0 {
+            SW_RESTORE
+        } else {
+            SW_SHOW
+        };
+        ShowWindowAsync(hwnd, command);
+        SetForegroundWindow(hwnd);
+    }
+}
+
+pub(crate) fn hide(window: &eframe::Frame) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    if let Ok(handle) = window.window_handle() {
+        if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+            unsafe { ShowWindow(handle.hwnd.get() as _, SW_HIDE) };
+        }
+    }
 }
 
 impl Drop for Tray {

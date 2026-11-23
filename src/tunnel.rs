@@ -1,3 +1,4 @@
+use crate::tunnel_job::TunnelJob;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -71,6 +72,7 @@ pub fn system_program(relative_path: &str) -> Result<PathBuf, String> {
 
 pub struct Tunnel {
     process: Child,
+    job: TunnelJob,
     diagnostics: fs::File,
     endpoint: SocketAddrV4,
     netstat: PathBuf,
@@ -115,11 +117,13 @@ impl Tunnel {
         } else {
             command.args(["--", &profile.server]);
         }
-        let process = command
-            .spawn()
+        let job = TunnelJob::new().map_err(|error| error.to_string())?;
+        let process = job
+            .spawn(&mut command)
             .map_err(|error| format!("Could not launch OpenSSH: {error}"))?;
         Ok(Self {
             process,
+            job,
             diagnostics,
             endpoint,
             netstat,
@@ -127,6 +131,10 @@ impl Tunnel {
             ready: false,
             _known_host: known_host,
         })
+    }
+
+    pub(crate) fn spawn_companion(&self, command: &mut Command) -> io::Result<Child> {
+        self.job.spawn(command)
     }
 }
 

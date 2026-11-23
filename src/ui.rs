@@ -1167,18 +1167,11 @@ impl eframe::App for Desktop {
                 Err(_) => {}
             }
         }
-        while let Some(event) = self.tray.as_ref().and_then(crate::tray::Tray::next) {
-            match event {
-                crate::tray::Action::Show => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                crate::tray::Action::Quit => {
-                    self.closing = true;
-                    self.client.disconnect();
-                }
-            }
+        while let Some(crate::tray::Action::Quit) =
+            self.tray.as_ref().and_then(crate::tray::Tray::next)
+        {
+            self.closing = true;
+            self.client.disconnect();
         }
         if self
             .update
@@ -1226,18 +1219,15 @@ impl eframe::App for Desktop {
         if self.update.is_some() {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
-        if ctx.input(|input| input.viewport().close_requested())
-            && !self.closing
-            && self.tray.is_some()
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        } else if ctx.input(|input| input.viewport().close_requested())
-            && (self.client.tunnel.is_some() || self.client.disconnecting.is_some())
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.closing = true;
-            self.client.disconnect();
+        if ctx.input(|input| input.viewport().close_requested()) {
+            if !self.closing && self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                crate::tray::hide(frame);
+            } else if self.client.tunnel.is_some() || self.client.disconnecting.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.closing = true;
+                self.client.disconnect();
+            }
         }
         self.client.poll_disconnect();
         if self.closing && self.client.disconnecting.is_none() {
