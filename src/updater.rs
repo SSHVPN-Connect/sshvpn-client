@@ -43,15 +43,30 @@ fn download_script(path: &std::path::Path, current: &str) -> String {
         $headers = @{{ 'User-Agent' = 'SSH-Tunnel'; Accept = 'application/vnd.github+json' }}
         $api = 'https://api.github.com/repos/SSHVPN-Connect/sshvpn-client'
         $token = $env:SSH_TUNNEL_GITHUB_TOKEN
-        if ($token) {{ $headers.Authorization = 'Bearer ' + $token.Trim() }}
+        $authenticated = $false
         try {{
             $release = Invoke-RestMethod -Uri "$api/releases/latest" -Headers $headers -TimeoutSec 20
         }} catch {{
             $status = [int]$_.Exception.Response.StatusCode
-            if ($status -eq 404 -or $status -eq 401) {{
+            if ($status -in @(403, 404, 429) -and $token -and $token.Trim()) {{
+                $headers.Authorization = 'Bearer ' + $token.Trim()
+                try {{
+                    $release = Invoke-RestMethod -Uri "$api/releases/latest" -Headers $headers -TimeoutSec 20
+                    $authenticated = $true
+                }} catch {{
+                    $status = [int]$_.Exception.Response.StatusCode
+                    if ($status -in @(401, 403, 404)) {{
+                        throw "GitHub отклонил проверку обновлений (HTTP $status). Проверьте доступ Contents: read к SSHVPN-Connect/sshvpn-client для SSH_TUNNEL_GITHUB_TOKEN."
+                    }}
+                    throw
+                }}
+            }} elseif ($status -eq 404 -or $status -eq 401) {{
                 throw 'Нет доступа к релизам GitHub. Для закрытого репозитория настройте SSH_TUNNEL_GITHUB_TOKEN с доступом Contents: read к SSHVPN-Connect/sshvpn-client.'
+            }} elseif ($status -in @(403, 429)) {{
+                throw "GitHub отклонил проверку обновлений (HTTP $status). Повторите попытку позже или скачайте установщик со страницы релиза."
+            }} else {{
+                throw
             }}
-            throw
         }}
         if ($release.draft -or $release.prerelease -or $release.tag_name -cnotmatch '^v(\d+\.\d+\.\d+)$') {{
             throw 'Unexpected GitHub release version.'
@@ -66,12 +81,20 @@ fn download_script(path: &std::path::Path, current: &str) -> String {
             throw 'The release is missing a verifiable Windows installer.'
         }}
         $ProgressPreference = 'SilentlyContinue'
-        if ($token) {{
-            if ([string]$asset.id -cnotmatch '^[1-9][0-9]*$') {{ throw 'Invalid release asset ID.' }}
-            $headers.Accept = 'application/octet-stream'
-            Invoke-WebRequest -UseBasicParsing -Uri "$api/releases/assets/$($asset.id)" -Headers $headers -OutFile '{path}' -TimeoutSec 180
-        }} else {{
-            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile '{path}' -TimeoutSec 180
+        try {{
+            if ($authenticated) {{
+                if ([string]$asset.id -cnotmatch '^[1-9][0-9]*$') {{ throw 'Invalid release asset ID.' }}
+                $headers.Accept = 'application/octet-stream'
+                Invoke-WebRequest -UseBasicParsing -Uri "$api/releases/assets/$($asset.id)" -Headers $headers -OutFile '{path}' -TimeoutSec 180
+            }} else {{
+                Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile '{path}' -TimeoutSec 180
+            }}
+        }} catch {{
+            $status = [int]$_.Exception.Response.StatusCode
+            if ($status -in @(401, 403, 404, 429)) {{
+                throw "GitHub отклонил скачивание установщика (HTTP $status). Скачайте его со страницы релиза."
+            }}
+            throw
         }}
         $file = Get-Item -LiteralPath '{path}'
         $hasher = [Security.Cryptography.SHA256]::Create()
@@ -102,11 +125,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn updater_skips_old_releases_and_rejects_corrupt_installers() {
+    fn public_updates_ignore_configured_token_and_validate_installer() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("installer.exe");
         let mock = r#"
             function Invoke-RestMethod {
+                param($Uri, $Headers, $TimeoutSec)
+                if ($Headers.Authorization) { throw 'Public request included a token.' }
                 @{
                     tag_name = 'v0.3.0'
                     assets = @(@{
@@ -121,11 +146,8 @@ mod tests {
             }
             function Invoke-WebRequest {
                 param([switch]$UseBasicParsing, $Uri, $OutFile, $TimeoutSec, $Headers)
-                if ($env:SSH_TUNNEL_GITHUB_TOKEN) {
-                    if ($Uri -ne 'https://api.github.com/repos/SSHVPN-Connect/sshvpn-client/releases/assets/1234' -or
-                        $Headers.Authorization -ne 'Bearer test-token' -or
-                        $Headers.Accept -ne 'application/octet-stream') { throw 'Invalid private download request.' }
-                }
+                if ($Uri -ne 'https://github.com/SSHVPN-Connect/sshvpn-client/releases/download/v0.3.0/ssh-tunnel-setup-x64.exe' -or
+                    $Headers.Authorization) { throw 'Invalid public download request.' }
                 [IO.File]::WriteAllText($OutFile, 'hello')
             }
         "#;
