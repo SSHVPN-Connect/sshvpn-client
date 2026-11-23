@@ -365,17 +365,19 @@ install -m 0755 "$temp" /usr/local/libexec/ssh-tunnel-invite
 cat > "$temp" <<'SESSION'
 #!/bin/sh
 set -eu
-if [ "${SSH_ORIGINAL_COMMAND-}" != "ssh-tunnel-vpn" ]; then
-    exit 1
-fi
+case "${SSH_ORIGINAL_COMMAND-}" in
+    ssh-tunnel-vpn) set -- ;;
+    ssh-tunnel-vpn-v2) set -- --multi ;;
+    *) exit 1 ;;
+esac
 if [ ! -x /usr/local/libexec/ssh-tunnel-vpn ]; then
     echo 'System IPv4 VPN is unavailable. Ask the owner to connect in System VPN mode first.' >&2
     exit 1
 fi
-exec /usr/bin/sudo -n -- /usr/local/libexec/ssh-tunnel-vpn
+exec /usr/bin/sudo -n -- /usr/local/libexec/ssh-tunnel-vpn "$@"
 SESSION
 install -m 0755 "$temp" /usr/local/libexec/ssh-tunnel-invite-session
-printf '%s\n' '%ssh-tunnel-share ALL=(root) NOPASSWD: /usr/local/libexec/ssh-tunnel-invite redeem, /usr/local/libexec/ssh-tunnel-vpn ""' > "$temp"
+printf '%s\n' '%ssh-tunnel-share ALL=(root) NOPASSWD: /usr/local/libexec/ssh-tunnel-invite redeem, /usr/local/libexec/ssh-tunnel-vpn "", /usr/local/libexec/ssh-tunnel-vpn --multi' > "$temp"
 visudo -cf "$temp" >/dev/null
 install -m 0440 "$temp" /etc/sudoers.d/ssh-tunnel-invites
 cat > "$temp" <<'SSHD'
@@ -409,5 +411,5 @@ if ! systemctl reload ssh; then
 fi
 env -u SUDO_USER /usr/local/libexec/ssh-tunnel-invite upgrade
 touch /var/lib/ssh-tunnel-invites/installed-v1 /var/lib/ssh-tunnel-invites/installed-v2 /var/lib/ssh-tunnel-invites/installed-v3 /var/lib/ssh-tunnel-invites/installed-v4
-touch /var/lib/ssh-tunnel-invites/installed-v6 /var/lib/ssh-tunnel-invites/installed-v7
+touch /var/lib/ssh-tunnel-invites/installed-v6 /var/lib/ssh-tunnel-invites/installed-v7 /var/lib/ssh-tunnel-invites/installed-v8
 printf '%s\n' 'SSH Tunnel invitations are installed on port 22.'
