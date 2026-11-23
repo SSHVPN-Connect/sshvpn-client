@@ -12,6 +12,48 @@ enum AccessAction {
     Confirm,
 }
 
+fn moscow_time(value: &str) -> Option<String> {
+    use windows_sys::Win32::{
+        Foundation::{FILETIME, SYSTEMTIME},
+        System::Time::{FileTimeToSystemTime, SystemTimeToFileTime},
+    };
+
+    let mut parts = value.strip_suffix(" UTC")?.split(['-', ' ', ':']);
+    let mut number = || parts.next()?.parse::<u16>().ok();
+    let utc = SYSTEMTIME {
+        wYear: number()?,
+        wMonth: number()?,
+        wDay: number()?,
+        wHour: number()?,
+        wMinute: number()?,
+        wSecond: number()?,
+        ..Default::default()
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    let mut file_time = FILETIME::default();
+    if unsafe { SystemTimeToFileTime(&utc, &mut file_time) } == 0 {
+        return None;
+    }
+    const MOSCOW_OFFSET: u64 = 3 * 60 * 60 * 10_000_000;
+    let ticks = (u64::from(file_time.dwHighDateTime) << 32) | u64::from(file_time.dwLowDateTime);
+    let ticks = ticks.checked_add(MOSCOW_OFFSET)?;
+    let shifted = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut moscow = SYSTEMTIME::default();
+    if unsafe { FileTimeToSystemTime(&shifted, &mut moscow) } == 0 {
+        return None;
+    }
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} МСК",
+        moscow.wYear, moscow.wMonth, moscow.wDay,
+        moscow.wHour, moscow.wMinute, moscow.wSecond,
+    ))
+}
+
 fn access_row(
     ui: &mut egui::Ui,
     entry: &invites::AccessEntry,
@@ -53,7 +95,8 @@ fn access_row(
     } else {
         &entry.name
     };
-    let last = entry.last_connected.as_deref().unwrap_or(if expired {
+    let moscow = entry.last_connected.as_deref().and_then(moscow_time);
+    let last = moscow.as_deref().or(entry.last_connected.as_deref()).unwrap_or(if expired {
         "Ещё не подключался"
     } else {
         "Нет записи в журнале"
@@ -179,6 +222,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn last_connection_uses_moscow_time_across_day_boundaries() {
+        assert_eq!(
+            moscow_time("2026-12-31 22:15:40 UTC").as_deref(),
+            Some("2027-01-01 01:15:40 МСК")
+        );
+        assert_eq!(
+            moscow_time("2024-02-28 21:00:00 UTC").as_deref(),
+            Some("2024-02-29 00:00:00 МСК")
+        );
+        assert!(moscow_time("2026-02-31 22:15:40 UTC").is_none());
+    }
+
+    #[test]
     fn last_successful_access_list_is_cached_per_server() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
@@ -260,6 +316,7 @@ enum Completion {
     Shared(String),
     Imported(Box<invites::Imported>),
     Access(Vec<invites::AccessEntry>, Option<&'static str>),
+    AccessChanged(&'static str),
 }
 
 #[derive(Default)]
@@ -273,6 +330,7 @@ pub struct InviteUi {
     recipient: String,
     revoke_user: Option<(String, AccessChange)>,
     load_access: bool,
+    last_access_fetch: Option<std::time::Instant>,
     server_update_required: bool,
     ssh_secret: String,
     shared: bool,
@@ -334,6 +392,16 @@ impl InviteUi {
         self.load_access = self.operation == Some(Operation::Manage);
     }
 
+    pub fn refresh_if_stale(&mut self) {
+        if self.worker.is_none()
+            && self.last_access_fetch.is_none_or(|time| {
+                time.elapsed() >= std::time::Duration::from_secs(20)
+            })
+        {
+            self.refresh();
+        }
+    }
+
     pub fn open(&mut self, operation: Operation) {
         if self.worker.is_none() && !matches!(self.result, Some(Completion::Imported(_))) {
             *self = Self {
@@ -369,6 +437,7 @@ impl InviteUi {
                 Ok(result) => {
                     if matches!(result, Completion::Access(..)) {
                         self.server_update_required = false;
+                        self.last_access_fetch = Some(std::time::Instant::now());
                     }
                     match &result {
                         Completion::Shared(_) => {
@@ -376,6 +445,10 @@ impl InviteUi {
                         }
                         Completion::Access(_, Some(message)) => {
                             client.report(Ok(()), Some(message))
+                        }
+                        Completion::AccessChanged(message) => {
+                            client.report(Ok(()), Some(message));
+                            self.refresh();
                         }
                         _ => {}
                     }
@@ -397,7 +470,9 @@ impl InviteUi {
                         }
                     }
                     self.shared = matches!(result, Completion::Shared(_));
-                    self.result = Some(result);
+                    if !matches!(result, Completion::AccessChanged(_)) {
+                        self.result = Some(result);
+                    }
                 }
                 Err(error) => {
                     if error == invites::UPDATE_REQUIRED {
@@ -489,6 +564,7 @@ impl InviteUi {
                             save_import = true;
                         }
                     }
+                    Some(Completion::AccessChanged(_)) => {}
                     Some(Completion::Access(entries, _)) => {
                         if entries.is_empty() {
                             ui.label("Приглашений пока нет.");
@@ -707,20 +783,20 @@ impl InviteUi {
                     } else if update {
                         invites::update_and_list(&profile, secret)
                             .map(|entries| Completion::Access(entries, Some("Сервер обновлён.")))
-                    } else {
-                        let message = if let Some((user, change)) = user {
-                            invites::change_access(&profile, secret.clone(), user, change)?;
-                            Some(match change {
-                                AccessChange::Revoke => "Доступ отозван.",
-                                AccessChange::RemoveExpired => "Просроченное приглашение удалено.",
-                                AccessChange::RemoveRevoked => "Запись пользователя удалена.",
-                                AccessChange::Restore => "Доступ восстановлен.",
-                            })
-                        } else {
-                            None
+                    } else if let Some((user, change)) = user {
+                        let message = match change {
+                            AccessChange::Revoke => "Доступ отозван.",
+                            AccessChange::RemoveExpired => "Просроченное приглашение удалено.",
+                            AccessChange::RemoveRevoked => "Запись пользователя удалена.",
+                            AccessChange::Restore => "Доступ восстановлен.",
                         };
+                        Ok(match invites::change_access(&profile, secret, user, change)? {
+                            Some(entries) => Completion::Access(entries, Some(message)),
+                            None => Completion::AccessChanged(message),
+                        })
+                    } else {
                         invites::list(&profile, secret)
-                            .map(|entries| Completion::Access(entries, message))
+                            .map(|entries| Completion::Access(entries, None))
                     }
                 }));
             }

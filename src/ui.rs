@@ -301,8 +301,6 @@ impl Desktop {
             );
             ui.add_space(21.0);
             let stopping = self.client.disconnecting.is_some();
-            let manageable =
-                self.client.tunnel.is_none() && !stopping && self.client.directory.is_ok();
             let (header, _) = ui.allocate_exact_size(vec2(208.0, 34.0), Sense::hover());
             slot_text(
                 ui,
@@ -364,6 +362,7 @@ impl Desktop {
                         ui.label(RichText::new("Нет сохранённых профилей").color(MUTED));
                     }
                     for (index, profile) in self.client.profiles.entries.iter().enumerate() {
+                        let manageable = self.client.can_edit_profile(index);
                         ui.add_enabled_ui(self.client.directory.is_ok(), |ui| {
                             ui.push_id(index, |ui| {
                                 let (rect, response, hover) =
@@ -490,8 +489,15 @@ impl Desktop {
         use crate::invite_ui::Operation;
         let active = self.client.tunnel.is_some();
         let stopping = self.client.disconnecting.is_some();
-        let manageable = !active && !stopping;
+        let can_change_mode = !active && !stopping;
         let selected = self.client.profiles.selected;
+        let can_edit_selected = selected.is_some_and(|index| self.client.can_edit_profile(index));
+        let invited = selected.is_some_and(|index| {
+            self.client.profiles.entries[index].connection.is_invited()
+        });
+        if invited && self.profile_tab == ProfileTab::Users {
+            self.profile_tab = ProfileTab::Connection;
+        }
         let owner = selected.and_then(|index| {
             let profile = &self.client.profiles.entries[index].connection;
             (profile.user == "root").then(|| profile.server.trim().to_ascii_lowercase())
@@ -673,11 +679,11 @@ impl Desktop {
                         ))
                         .layout(Layout::top_down(Align::Min)),
                 );
-                mode_ui.add_enabled_ui(manageable, |ui| segments(ui, &mut mode));
+                mode_ui.add_enabled_ui(can_change_mode, |ui| segments(ui, &mut mode));
             } else {
                 connect = connection_button(ui);
                 ui.add_space(8.0);
-                ui.add_enabled_ui(manageable, |ui| segments(ui, &mut mode));
+                ui.add_enabled_ui(can_change_mode, |ui| segments(ui, &mut mode));
             }
         });
         if connect {
@@ -698,7 +704,7 @@ impl Desktop {
                 self.client.report(result, None);
             }
         }
-        if manageable && mode != self.client.draft.mode {
+        if can_change_mode && mode != self.client.draft.mode {
             let result = self.client.set_mode(mode);
             self.client.report(result, None);
         }
@@ -711,12 +717,15 @@ impl Desktop {
                     (ProfileTab::Users, "Пользователи", 126.0),
                     (ProfileTab::Routing, "Маршрутизация", 143.0),
                 ] {
+                    if invited && tab == ProfileTab::Users {
+                        continue;
+                    }
                     if pill(ui, label, width, self.profile_tab == tab).clicked()
                         && tab != self.profile_tab
                     {
                         self.profile_tab = tab;
                         if tab == ProfileTab::Users {
-                            self.access.refresh();
+                            self.access.refresh_if_stale();
                         }
                     }
                 }
@@ -724,8 +733,8 @@ impl Desktop {
             ui.add_space(16.0);
             match self.profile_tab {
                 ProfileTab::Connection if selected.is_some() => {
-                    ui.add_enabled_ui(manageable, |ui| self.profile_fields(ui));
-                    if manageable
+                    ui.add_enabled_ui(can_edit_selected, |ui| self.profile_fields(ui));
+                    if can_edit_selected
                         && self.client.dirty()
                         && pill(ui, "Отменить изменения", 173.0, false).clicked()
                     {
@@ -741,7 +750,7 @@ impl Desktop {
                 ProfileTab::Routing
                     if selected.is_some() && self.client.draft.mode == Mode::SystemVpn =>
                 {
-                    ui.add_enabled_ui(manageable, |ui| self.routing_panel(ui));
+                    ui.add_enabled_ui(can_edit_selected, |ui| self.routing_panel(ui));
                 }
                 ProfileTab::Connection => {
                     ui.label("Выберите профиль или создайте новый.");
@@ -872,7 +881,7 @@ impl Desktop {
         }
     }
 
-    fn profile_fields(&mut self, ui: &mut Ui) {
+    fn manual_profile_fields(&mut self, ui: &mut Ui) {
         let profile = &mut self.client.draft;
         ui.columns(2, |cols| {
             field(
@@ -999,6 +1008,25 @@ impl Desktop {
                 "1080",
                 false,
             );
+        }
+    }
+
+    fn profile_fields(&mut self, ui: &mut Ui) {
+        if self.client.draft.connection.is_invited() {
+            field(
+                ui,
+                "Имя профиля",
+                &mut self.client.draft.name,
+                "Домашний сервер",
+                false,
+            );
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Способ входа").color(MUTED));
+                badge(ui, "По приглашению", false);
+            });
+        } else {
+            self.manual_profile_fields(ui);
         }
         ui.add_space(10.0);
         let (actions, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
@@ -2198,7 +2226,7 @@ mod tests {
                 entries: vec![home.clone(), office.clone()],
                 selected: Some(0),
             },
-            active_profile: Some(crate::ActiveProfile::from(&home)),
+            active_profile: Some(crate::ActiveProfile::new(&home, Some(0))),
             draft: home,
             local_port: "1080".into(),
             password: String::new(),
@@ -2258,6 +2286,61 @@ mod tests {
         assert_eq!(assets.mark.size, vec2(22.0, 22.0));
         for icon in [&assets.server, &assets.close] {
             assert_eq!(icon.size, vec2(20.0, 20.0));
+        }
+    }
+
+    #[test]
+    fn invited_profiles_hide_users_and_credentials_but_keep_routing() {
+        let ctx = egui::Context::default();
+        let profile = crate::SavedProfile {
+            name: "Мой VPN".into(),
+            connection: crate::tunnel::Profile {
+                server: "vpn.example.com".into(),
+                user: "stv_0123456789abcdef".into(),
+                host_key: Some("pinned key".into()),
+                ..Default::default()
+            },
+            mode: Mode::Socks5,
+            authentication: Authentication::Key,
+            ..Default::default()
+        };
+        let client = Client {
+            directory: Ok(std::path::PathBuf::new()),
+            profiles: crate::Profiles {
+                entries: vec![profile.clone()],
+                selected: Some(0),
+            },
+            draft: profile,
+            local_port: "1080".into(),
+            password: String::new(),
+            tunnel: None,
+            active_profile: None,
+            disconnecting: None,
+            notices: Vec::new(),
+            confirming_delete: false,
+            editing: false,
+            keep_selection_on_insert: None,
+        };
+        let mut desktop = Desktop::new(&ctx, client).unwrap();
+        desktop.profile_tab = ProfileTab::Users;
+        let frame = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 660.0))),
+                ..Default::default()
+            },
+            |ctx| desktop.paint(ctx),
+        );
+        let has_label = |label| {
+            frame.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == label)
+            })
+        };
+        assert!(desktop.profile_tab == ProfileTab::Connection);
+        for label in ["Имя профиля", "Способ входа", "По приглашению", "Маршрутизация"] {
+            assert!(has_label(label), "Missing {label}");
+        }
+        for label in ["Пользователи", "Адрес SSH", "Имя пользователя", "Файл приватного ключа", "Локальный порт SOCKS5"] {
+            assert!(!has_label(label), "Unexpected {label}");
         }
     }
 

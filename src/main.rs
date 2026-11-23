@@ -56,6 +56,7 @@ impl Connection {
 }
 
 struct ActiveProfile {
+    index: Option<usize>,
     name: String,
     server: String,
     mode: Mode,
@@ -63,9 +64,10 @@ struct ActiveProfile {
     ipv4_routing: Ipv4Routing,
 }
 
-impl From<&SavedProfile> for ActiveProfile {
-    fn from(profile: &SavedProfile) -> Self {
+impl ActiveProfile {
+    fn new(profile: &SavedProfile, index: Option<usize>) -> Self {
         Self {
+            index,
             name: profile.name.clone(),
             server: profile.connection.server.clone(),
             mode: profile.mode,
@@ -292,7 +294,10 @@ impl Client {
     fn save_prepared_profile(&mut self, profile: SavedProfile) -> Result<(), String> {
         let mut updated = self.profiles.clone();
         if let Some(index) = updated.selected {
-            updated.entries[index] = profile.clone();
+            if !self.can_edit_profile(index) {
+                return Err("Отключите профиль перед редактированием.".into());
+            }
+            updated.entries[index] = profile;
         } else {
             return self.append_profile(profile);
         }
@@ -301,15 +306,27 @@ impl Client {
         Ok(())
     }
 
+    fn can_edit_profile(&self, index: usize) -> bool {
+        self.directory.is_ok()
+            && self.disconnecting.is_none()
+            && self.active_profile.as_ref().and_then(|profile| profile.index) != Some(index)
+    }
+
     fn delete_profile(&mut self) -> Result<(), String> {
         let Some(index) = self.profiles.selected else {
             return Ok(());
         };
+        if !self.can_edit_profile(index) {
+            return Err("Отключите профиль перед удалением.".into());
+        }
         let mut updated = self.profiles.clone();
         updated.entries.remove(index);
         updated.selected =
             (!updated.entries.is_empty()).then(|| index.min(updated.entries.len() - 1));
         self.store(updated)?;
+        if let Some(active) = &mut self.active_profile {
+            active.index = active.index.map(|position| position - usize::from(position > index));
+        }
         self.load_selection();
         Ok(())
     }
@@ -349,7 +366,7 @@ impl Client {
                 return Err(error);
             }
         };
-        self.start_connection(profile, secret)
+        self.start_connection(profile, secret, Some(index))
     }
 
     fn connection_secret(profile: &SavedProfile) -> Result<String, String> {
@@ -381,12 +398,17 @@ impl Client {
         } else {
             std::mem::take(&mut self.password)
         };
-        self.start_connection(profile, secret)
+        self.start_connection(profile, secret, None)
     }
 
-    fn start_connection(&mut self, profile: SavedProfile, secret: String) -> Result<(), String> {
+    fn start_connection(
+        &mut self,
+        profile: SavedProfile,
+        secret: String,
+        index: Option<usize>,
+    ) -> Result<(), String> {
         let password_auth = profile.authentication == Authentication::Password;
-        let active_profile = ActiveProfile::from(&profile);
+        let active_profile = ActiveProfile::new(&profile, index);
         self.tunnel = Some(match profile.mode {
             Mode::SystemVpn if profile.ipv4_routing.by_application => {
                 Connection::Apps(app_tunnel::AppTunnel::start(
@@ -488,8 +510,12 @@ mod tests {
             .toggle_connection()
             .unwrap_err()
             .contains("Cannot use local address"));
+        client.active_profile = Some(ActiveProfile::new(&saved.entries[0], Some(0)));
+        assert!(!client.can_edit_profile(0));
+        assert!(client.can_edit_profile(1));
         client.draft.name = "Renamed Office".into();
         client.save_profile().unwrap();
+        assert_eq!(client.active_profile.as_ref().unwrap().name, "Home");
         assert_eq!(
             Client::connection_secret(&client.draft).unwrap(),
             "test-only secret"

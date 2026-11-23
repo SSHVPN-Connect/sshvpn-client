@@ -34,9 +34,21 @@ pub(crate) const UPDATE_REQUIRED: &str =
 #[derive(Serialize, Deserialize)]
 struct Ticket {
     server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_name: Option<String>,
     user: String,
     host_key: String,
     temporary_key: String,
+}
+
+impl Ticket {
+    fn imported_name(&self) -> String {
+        self.profile_name
+            .as_ref()
+            .filter(|name| !name.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("{} · приглашение", self.server))
+    }
 }
 
 #[derive(Deserialize)]
@@ -376,6 +388,10 @@ pub fn issue(profile: SavedProfile, secret: String, name: String) -> Result<Stri
     if profile.connection.user != "root" {
         return Err("Для выдачи приглашений нужен профиль SSH с пользователем root.".into());
     }
+    // Keep the encrypted invitation within the existing format's payload limit.
+    if serde_json::to_string(&profile.name).map_err(|error| error.to_string())?.len() > 2048 {
+        return Err("Название профиля слишком длинное для приглашения.".into());
+    }
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = directory.path().join("bootstrap");
     let staging_key = generate(&path)?;
@@ -392,6 +408,7 @@ pub fn issue(profile: SavedProfile, secret: String, name: String) -> Result<Stri
     }
     let ticket = Ticket {
         server: profile.connection.server,
+        profile_name: Some(profile.name),
         user: issued.user,
         host_key: issued.host_key,
         temporary_key,
@@ -431,6 +448,7 @@ pub fn redeem(encoded: &str, code: &str, base: &Path) -> Result<Imported, String
     let bootstrap = temporary.path().join("bootstrap");
     write_bootstrap_key(&bootstrap, ticket.temporary_key.as_bytes())
         .map_err(|error| format!("Не удалось безопасно сохранить временный SSH-ключ: {error}"))?;
+    let name = ticket.imported_name();
     let mut connection = Profile {
         server: ticket.server,
         user: ticket.user,
@@ -460,7 +478,7 @@ pub fn redeem(encoded: &str, code: &str, base: &Path) -> Result<Imported, String
     }
     connection.key = permanent.to_string_lossy().into_owned();
     let profile = SavedProfile {
-        name: format!("{} · приглашение", connection.server),
+        name,
         connection,
         mode: Mode::Socks5,
         authentication: Authentication::Key,
@@ -485,7 +503,7 @@ pub fn change_access(
     secret: String,
     user: String,
     change: AccessChange,
-) -> Result<(), String> {
+) -> Result<Option<Vec<AccessEntry>>, String> {
     if profile.connection.user != "root" || !valid_user(&user) {
         return Err("Выберите профиль root и укажите SSH-пользователя из приглашения.".into());
     }
@@ -495,17 +513,31 @@ pub fn change_access(
         AccessChange::RemoveRevoked => ("remove-revoked", "revoked"),
         AccessChange::Restore => ("restore", "restored"),
     };
-    let response: Value = request(
+    // Both commands use the existing server API over a single SSH session.
+    let remote = format!(
+        r#"set -eu
+reply=$({HANDLER} {command})
+printf '[%s,' "$reply"
+if entries=$({LIST_COMMAND}); then
+    printf '%s]\n' "$entries"
+else
+    printf 'null]\n'
+fi"#
+    );
+    let data = json!({ "user": user });
+    let (response, entries): (Value, Option<Vec<AccessEntry>>) = exchange(
         &profile.connection,
         profile.authentication == Authentication::Password,
         secret,
-        command,
-        json!({ "user": user }),
+        &remote,
+        &format!("{data}\n"),
+        45,
+        true,
     )?;
     if response[acknowledgement] != true {
         return Err("Сервер не подтвердил изменение доступа.".into());
     }
-    Ok(())
+    Ok(entries)
 }
 
 pub fn list(profile: &SavedProfile, secret: String) -> Result<Vec<AccessEntry>, String> {
@@ -675,6 +707,7 @@ mod tests {
     fn invitation_accepts_combined_and_legacy_formats() {
         let ticket = Ticket {
             server: "host.example".into(),
+            profile_name: None,
             user: "stv_0123456789abcdef".into(),
             host_key: "public".into(),
             temporary_key: "temporary".into(),
@@ -692,6 +725,16 @@ mod tests {
             open_invitation(&combined, "").unwrap().temporary_key,
             ticket.temporary_key
         );
+        let old = open_invitation(&combined, "").unwrap();
+        assert!(old.profile_name.is_none());
+        assert_eq!(old.imported_name(), "host.example · приглашение");
+        let named = Ticket {
+            profile_name: Some("Мой сервер — Европа".into()),
+            ..old
+        };
+        let (encrypted_named, code_named) = seal(&named).unwrap();
+        let imported = open_invitation(&format!("{encrypted_named}:{code_named}"), "").unwrap();
+        assert_eq!(imported.imported_name(), "Мой сервер — Европа");
         assert!(open_invitation(&encrypted, "").is_err());
         assert!(open_invitation(
             &format!("{encrypted}:{}", URL_SAFE_NO_PAD.encode([0; 32])),

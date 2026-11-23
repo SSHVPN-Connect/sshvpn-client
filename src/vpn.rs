@@ -30,10 +30,6 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 exec /usr/local/libexec/ssh-tunnel-vpn --multi"#;
 
-fn is_invited(profile: &Profile) -> bool {
-    profile.host_key.is_some() && crate::invites::valid_user(&profile.user)
-}
-
 enum Status {
     ConfiguringAdapter,
     Ready,
@@ -114,7 +110,7 @@ impl Vpn {
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    let invited = is_invited(&profile);
+                    let invited = profile.is_invited();
                     let server_command = if invited {
                         INVITED_VPN_COMMAND
                     } else {

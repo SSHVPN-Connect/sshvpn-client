@@ -34,6 +34,10 @@ impl Default for Profile {
 }
 
 impl Profile {
+    pub(crate) fn is_invited(&self) -> bool {
+        self.host_key.is_some() && crate::invites::valid_user(&self.user)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let hostname = self.server.trim_end_matches('.');
         let valid_hostname = !hostname.is_empty()
