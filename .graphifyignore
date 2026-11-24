@@ -1,0 +1,7 @@
+target/
+.rust-build/
+.idea/
+.agents/
+.codex/
+diagrams/
+graphify-out/
