@@ -1,6 +1,9 @@
 use crate::profiles::Ipv4Prefix;
 use crate::tunnel::{ssh_command, ssh_error, system_program, Profile};
 use crate::tunnel_job::TunnelJob;
+use crate::vpn_log::Log;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
@@ -18,8 +21,7 @@ use windows_sys::Win32::Networking::WinSock::{
     AF_INET, IN_ADDR, IN_ADDR_0, MIB_IPPROTO_NETMGMT, SOCKADDR_IN, SOCKADDR_INET,
 };
 
-const MTU: usize = 1420;
-const ADAPTER_GUID: u128 = 0x9648bb2f_098b_4d6c_8f35_7c011cdf8651;
+pub(crate) const MTU: usize = 1420;
 const HELLO: &[u8; 8] = b"SSHVPN1\n";
 const MULTI_HELLO: &[u8; 8] = b"SSHVPN2\n";
 const INVITED_VPN_COMMAND: &str = "ssh-tunnel-vpn-v2";
@@ -35,7 +37,84 @@ enum Status {
     Ready,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct AdapterCache(Arc<Mutex<HashMap<u128, Arc<wintun::Adapter>>>>);
+
+impl AdapterCache {
+    pub(crate) fn remove(&self, id: u128) -> Option<Arc<wintun::Adapter>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&id)
+    }
+
+    fn insert(&self, id: u128, adapter: Arc<wintun::Adapter>) {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id, adapter);
+    }
+}
+
+pub(crate) fn new_adapter_id() -> Result<u128, String> {
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(u128::from_be_bytes(bytes))
+}
+
+fn name_adapter(
+    adapter: &wintun::Adapter,
+    index: u32,
+    profile: &str,
+    ip: Ipv4Addr,
+) -> Result<(), String> {
+    let mut label = String::new();
+    let mut units = 0;
+    for ch in profile.trim().chars() {
+        if units + ch.len_utf16() > 48 {
+            break;
+        }
+        units += ch.len_utf16();
+        label.push(if ch.is_control() || "\\/:*?\"<>|".contains(ch) {
+            ' '
+        } else {
+            ch
+        });
+    }
+    let label = label.trim();
+    let label = if label.is_empty() {
+        "SSH Tunnel VPN"
+    } else {
+        label
+    };
+    let name = format!("{label} — {ip}");
+    let suffix = adapter.get_guid() as u32;
+    let duplicate_name = format!("{name} ({suffix:08x})");
+    let current = adapter.get_name().map_err(|error| error.to_string())?;
+    if current == name || current == duplicate_name {
+        return Ok(());
+    }
+    // Encode the user-supplied display text instead of interpolating it into PowerShell code.
+    let encoded = STANDARD.encode(&name);
+    powershell(&format!(
+        r"
+        $name = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))
+        $adapters = @(Get-NetAdapter -IncludeHidden)
+        $adapter = $adapters | Where-Object {{ $_.ifIndex -eq {index} }} | Select-Object -First 1
+        if (!$adapter) {{ throw 'Wintun adapter not found' }}
+        if ($adapters | Where-Object {{ $_.ifIndex -ne {index} -and $_.Name -eq $name }}) {{
+            $name += ' ({suffix:08x})'
+        }}
+        Rename-NetAdapter -InputObject $adapter -NewName $name -Confirm:$false
+        "
+    ))
+    .map(|_| ())
+}
+
 pub struct Vpn {
+    log: Log,
     child: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
     status: mpsc::Receiver<Result<Status, String>>,
@@ -47,10 +126,13 @@ pub struct Vpn {
 impl Vpn {
     pub fn start(
         profile: Profile,
+        profile_name: String,
         password_auth: bool,
         password: String,
         split: Option<Vec<Ipv4Prefix>>,
         ru_cache: Option<PathBuf>,
+        adapter_id: Option<u128>,
+        adapters: AdapterCache,
     ) -> Result<Self, String> {
         let dll = env::current_exe()
             .map_err(|e| e.to_string())?
@@ -63,23 +145,16 @@ impl Vpn {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
         let (tx, status) = mpsc::channel();
+        let log = Log::new();
         let worker = thread::Builder::new()
             .spawn(move || {
+                let mut connecting = Some(log.begin("connect"));
                 let job = TunnelJob::new();
                 let mut worker_ready = false;
                 let result = (|| {
                     let job = job.as_ref().map_err(|error| format!("Could not configure VPN SSH process cleanup: {error}"))?;
-                    powershell(
-                        r"
-                        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-                        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-                        if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-                            throw 'Run SSH Tunnel as administrator to enable System VPN.'
-                        }
-                        ",
-                    )?;
                     let prefixes = if let Some(directory) = &ru_cache {
-                        let regions = crate::ru_ranges::load(directory)?;
+                        let regions = log.step("load_ru_ranges", || crate::ru_ranges::load(directory))?;
                         if let Some(routes) = &split {
                             regions.validate_included(routes)?;
                             None
@@ -89,8 +164,7 @@ impl Vpn {
                     } else {
                         None
                     };
-                    let ip = (profile.server.as_str(), 22)
-                        .to_socket_addrs()
+                    let ip = log.step("resolve_endpoint", || (profile.server.as_str(), 22).to_socket_addrs())
                         .map_err(|e| e.to_string())?
                         .find_map(|address| match address.ip() {
                             std::net::IpAddr::V4(ip) => Some(ip),
@@ -100,12 +174,9 @@ impl Vpn {
                     if split.as_ref().is_some_and(|routes| routes.iter().any(|route| route.is_host() && route.contains(ip))) {
                         return Err("Удалите адрес SSH-сервера /32 из CIDR-списка: соединение с сервером должно идти напрямую.".into());
                     }
-                    // Use an absolute path beside the executable for the signed Wintun binary.
-                    let driver =
-                        unsafe { wintun::load_from_path(dll) }.map_err(|e| e.to_string())?;
                     let (mut command, mut diagnostics) =
                         ssh_command(&profile, password_auth, password)?;
-                    let _known_host = crate::tunnel::pin_host(&mut command, &profile)?;
+                    let _known_host = log.step("prepare_host_key", || crate::tunnel::pin_host(&mut command, &profile))?;
                     let mut process = child_for_worker.lock().map_err(|e| e.to_string())?;
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Ok(());
@@ -126,7 +197,7 @@ impl Vpn {
                         &ip.to_string(),
                         server_command,
                     ]);
-                    let mut ssh = job.spawn(&mut command).map_err(|e| e.to_string())?;
+                    let mut ssh = log.step("spawn_ssh", || job.spawn(&mut command)).map_err(|e| e.to_string())?;
                     let stdin = ssh.stdin.take().expect("piped SSH stdin");
                     let stdout = ssh.stdout.take().expect("piped SSH stdout");
                     *process = Some(ssh);
@@ -135,7 +206,7 @@ impl Vpn {
                     let (hello_tx, hello_rx) = mpsc::channel();
                     let (frames_tx, frames_rx) = mpsc::sync_channel(128);
                     thread::spawn(move || read_packets(stdout, hello_tx, frames_tx));
-                    let client_address = wait_for_greeting(&hello_rx, Duration::from_secs(22))
+                    let client_address = log.step("ssh_auth_and_server_greeting", || wait_for_greeting(&hello_rx, Duration::from_secs(22)))
                         .map_err(|error| {
                             let error = ssh_error(&mut diagnostics, error);
                             if invited {
@@ -148,39 +219,48 @@ impl Vpn {
                         return Ok(());
                     }
                     tx.send(Ok(Status::ConfiguringAdapter)).map_err(|e| e.to_string())?;
-                    // The crate gives adapter-creation failures a generic message.
-                    unsafe { windows_sys::Win32::Foundation::SetLastError(0) };
-                    let adapter_result =
-                        wintun::Adapter::create(&driver, "SSH Tunnel VPN", "SSH Tunnel", Some(ADAPTER_GUID));
-                    let windows_error = io::Error::last_os_error();
-                    let adapter = adapter_result.map_err(|error| {
-                        if matches!(&error, wintun::Error::String(message) if message == "Failed to create adapter")
-                            && windows_error.raw_os_error().is_some_and(|code| code != 0)
-                        {
-                            format!("Не удалось создать адаптер Wintun: {windows_error}")
-                        } else {
-                            format!("Не удалось создать адаптер Wintun: {error}")
-                        }
-                    })?;
-                    let index = adapter.get_adapter_index().map_err(|e| e.to_string())?;
-                    let session = Arc::new(
-                        adapter
-                            .start_session(wintun::MIN_RING_CAPACITY * 16)
-                            .map_err(|e| e.to_string())?,
-                    );
-                    let mut routes = Routes::new(index, ip);
-                    routes.apply(client_address, split.as_deref(), prefixes.as_deref(), &worker_cancelled)?;
+                    let mut network = if crate::elevation::is_admin() {
+                        let driver = unsafe { wintun::load_from_path(dll) }.map_err(|e| e.to_string())?;
+                        Network::Local(WindowsTunnel::start(
+                            &driver, &adapters, adapter_id, &profile_name, ip, client_address,
+                            split.as_deref(), prefixes.as_deref(), &worker_cancelled, log,
+                        )?)
+                    } else {
+                        let request = crate::vpn_service::Request {
+                            id: adapter_id,
+                            name: profile_name,
+                            server: ip,
+                            address: client_address,
+                            split: split.map(|routes| routes.iter().map(ToString::to_string).collect()),
+                            filtered: prefixes,
+                        };
+                        Network::Service(log.step("configure_vpn_service", || {
+                            crate::vpn_service::Channel::connect(
+                                &crate::vpn_service::ServiceRequest::System(request),
+                                &worker_cancelled,
+                            )
+                        })?)
+                    };
                     worker_ready = true;
-                    tx.send(Ok(Status::Ready)).map_err(|e| e.to_string())?;
-                    let result = forward(&session, stdin, &frames_rx, &worker_cancelled);
+                    if let Some(trace) = connecting.take() {
+                        trace.finish("ready");
+                    }
+                    let result = tx.send(Ok(Status::Ready)).map_err(|e| e.to_string())
+                        .and_then(|()| forward(&mut network, stdin, &frames_rx, &worker_cancelled));
                     let graceful = if result.is_ok() && worker_cancelled.load(Ordering::Acquire) {
-                        wait_for_ssh_exit(&child_for_worker, &frames_rx).map_err(|error| error.to_string())
+                        log.step("wait_for_server_exit", || wait_for_ssh_exit(&child_for_worker, &frames_rx)).map_err(|error| error.to_string())
                     } else {
                         Ok(())
                     };
-                    let cleanup = routes.remove();
+                    let cleanup = match network {
+                        Network::Local(network) => network.stop(&adapters, log),
+                        Network::Service(network) => log.step("stop_vpn_service", || network.stop()),
+                    };
                     result.and(graceful).and(cleanup)
                 })();
+                if let Some(trace) = connecting {
+                    trace.finish(if worker_cancelled.load(Ordering::Acquire) { "cancelled" } else { "failed" });
+                }
                 if let Ok(mut child) = child_for_worker.lock() {
                     if let Some(mut ssh) = child.take() {
                         let _ = ssh.kill();
@@ -195,6 +275,7 @@ impl Vpn {
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            log,
             child,
             cancelled,
             status,
@@ -233,6 +314,7 @@ impl Vpn {
     pub fn stop(&mut self) -> io::Result<()> {
         self.cancelled.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
+            let trace = self.log.begin("disconnect");
             if self.ready {
                 let deadline = Instant::now() + Duration::from_secs(6);
                 while !worker.is_finished() && Instant::now() < deadline {
@@ -246,9 +328,11 @@ impl Vpn {
                     }
                 }
             }
-            return worker
+            let result = worker
                 .join()
-                .map_err(|_| io::Error::other("VPN worker failed."))?;
+                .unwrap_or_else(|_| Err(io::Error::other("VPN worker failed.")));
+            trace.finish(if result.is_ok() { "stopped" } else { "failed" });
+            return result;
         }
         Ok(())
     }
@@ -355,8 +439,13 @@ fn wait_for_ssh_exit(
     }
 }
 
+enum Network {
+    Local(WindowsTunnel),
+    Service(crate::vpn_service::Channel),
+}
+
 fn forward(
-    session: &Arc<wintun::Session>,
+    network: &mut Network,
     mut stdin: ChildStdin,
     frames: &mpsc::Receiver<io::Result<Vec<u8>>>,
     cancelled: &AtomicBool,
@@ -367,9 +456,9 @@ fn forward(
             match frames.try_recv() {
                 Ok(frame) => {
                     let data = frame.map_err(|e| format!("SSH VPN stream ended: {e}"))?;
-                    if let Ok(mut packet) = session.allocate_send_packet(data.len() as u16) {
-                        packet.bytes_mut().copy_from_slice(&data);
-                        session.send_packet(packet);
+                    match network {
+                        Network::Local(network) => network.inject(&data),
+                        Network::Service(network) => network.inject(&data)?,
                     }
                     busy = true;
                 }
@@ -378,14 +467,15 @@ fn forward(
             }
         }
         for _ in 0..32 {
-            let Some(packet) = session.try_receive().map_err(|e| e.to_string())? else {
-                break;
+            let packet = match network {
+                Network::Local(network) => network.packet()?,
+                Network::Service(network) => network.packet()?,
             };
-            let data = packet.bytes();
+            let Some(data) = packet else { break };
             if (20..=MTU).contains(&data.len()) && data[0] >> 4 == 4 {
                 stdin
                     .write_all(&(data.len() as u16).to_be_bytes())
-                    .and_then(|()| stdin.write_all(data))
+                    .and_then(|()| stdin.write_all(&data))
                     .map_err(|e| e.to_string())?;
             }
             busy = true;
@@ -395,6 +485,110 @@ fn forward(
         }
     }
     Ok(())
+}
+
+pub(crate) struct WindowsTunnel {
+    adapter_id: Option<u128>,
+    routes: Routes,
+    session: Arc<wintun::Session>,
+    adapter: Arc<wintun::Adapter>,
+    client_address: Ipv4Addr,
+    full_tunnel: bool,
+}
+
+impl WindowsTunnel {
+    pub(crate) fn inject(&self, data: &[u8]) {
+        if let Ok(mut packet) = self.session.allocate_send_packet(data.len() as u16) {
+            packet.bytes_mut().copy_from_slice(data);
+            self.session.send_packet(packet);
+        }
+    }
+
+    pub(crate) fn packet(&self) -> Result<Option<Vec<u8>>, String> {
+        self.session
+            .try_receive()
+            .map(|packet| packet.map(|packet| packet.bytes().to_vec()))
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn start(
+        driver: &wintun::Wintun,
+        adapters: &AdapterCache,
+        adapter_id: Option<u128>,
+        profile_name: &str,
+        ip: Ipv4Addr,
+        client_address: Ipv4Addr,
+        split: Option<&[Ipv4Prefix]>,
+        prefixes: Option<&[(Ipv4Addr, u8)]>,
+        worker_cancelled: &AtomicBool,
+        log: Log,
+    ) -> Result<Self, String> {
+        let adapter = if let Some(adapter) = adapter_id.and_then(|id| adapters.remove(id)) {
+            log.step("reuse_wintun_adapter", || Ok::<_, String>(adapter))?
+        } else {
+            log.step("create_wintun_adapter", || {
+            let id = adapter_id.map_or_else(new_adapter_id, Ok)?;
+            let name = format!("SSH Tunnel VPN {id:032x}");
+            // The crate gives adapter-creation failures a generic message.
+            unsafe { windows_sys::Win32::Foundation::SetLastError(0) };
+            let adapter_result =
+                wintun::Adapter::create(driver, &name, "SSH Tunnel", Some(id));
+            let windows_error = io::Error::last_os_error();
+            adapter_result.map_err(|error| {
+            if matches!(&error, wintun::Error::String(message) if message == "Failed to create adapter")
+                && windows_error.raw_os_error().is_some_and(|code| code != 0)
+            {
+                format!("Не удалось создать адаптер Wintun: {windows_error}")
+            } else {
+                format!("Не удалось создать адаптер Wintun: {error}")
+            }
+            })
+          })?
+        };
+        let index = adapter.get_adapter_index().map_err(|e| e.to_string())?;
+        let _ = log.step("name_wintun_adapter", || {
+            name_adapter(&adapter, index, profile_name, ip)
+        });
+        let session = log
+            .step("start_wintun_session", || {
+                adapter.start_session(wintun::MIN_RING_CAPACITY * 16)
+            })
+            .map_err(|e| e.to_string())?;
+        let mut routes = Routes::new(index, ip);
+        log.step("apply_routes", || {
+            routes.apply(client_address, split, prefixes, worker_cancelled, log)
+        })?;
+        Ok(Self {
+            adapter_id,
+            routes,
+            session: Arc::new(session),
+            adapter,
+            client_address,
+            full_tunnel: split.is_none(),
+        })
+    }
+
+    pub(crate) fn stop(self, adapters: &AdapterCache, log: Log) -> Result<(), String> {
+        let Self {
+            adapter_id,
+            mut routes,
+            session,
+            adapter,
+            client_address,
+            full_tunnel,
+        } = self;
+        let cleanup = log.step("remove_routes", || {
+            routes.remove_session_config(client_address, full_tunnel)
+        });
+        drop(routes);
+        drop(session);
+        if let Some(id) = adapter_id.filter(|_| cleanup.is_ok()) {
+            adapters.insert(id, adapter);
+        } else {
+            let _ = log.step("close_wintun_adapter", || Ok::<_, io::Error>(drop(adapter)));
+        }
+        cleanup
+    }
 }
 
 struct Routes {
@@ -458,10 +652,11 @@ impl Routes {
         split: Option<&[Ipv4Prefix]>,
         filtered: Option<&[(Ipv4Addr, u8)]>,
         cancelled: &AtomicBool,
+        log: Log,
     ) -> Result<(), String> {
         let index = self.index;
         if split.is_none_or(|routes| routes.iter().any(|route| route.contains(self.server))) {
-            self.ensure_bypass()?;
+            log.step("configure_ssh_bypass", || self.ensure_bypass())?;
         }
         let mut script = format!(
             r"
@@ -487,42 +682,71 @@ impl Routes {
                 "));
             }
         }
-        powershell(&script)?;
+        log.step("configure_windows_network", || powershell(&script))?;
         if let Some(prefixes) = filtered {
-            for &(address, length) in prefixes {
-                if cancelled.load(Ordering::Acquire) {
-                    return Err("Подключение отменено.".into());
+            log.step("apply_filtered_routes", || {
+                for &(address, length) in prefixes {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err("Подключение отменено.".into());
+                    }
+                    if length == 32 && address == self.server {
+                        continue;
+                    }
+                    let mut row = MIB_IPFORWARD_ROW2::default();
+                    // Windows supplies the route lifetimes and other default fields.
+                    unsafe { InitializeIpForwardEntry(&mut row) };
+                    row.InterfaceIndex = index;
+                    row.DestinationPrefix.Prefix = ipv4_socket(address);
+                    row.DestinationPrefix.PrefixLength = length;
+                    row.NextHop = ipv4_socket(Ipv4Addr::UNSPECIFIED);
+                    row.Metric = 1;
+                    row.Protocol = MIB_IPPROTO_NETMGMT;
+                    let result = unsafe { CreateIpForwardEntry2(&row) };
+                    if result != 0 {
+                        return Err(format!(
+                            "Не удалось добавить маршрут {address}/{length}: {}",
+                            io::Error::from_raw_os_error(result as i32)
+                        ));
+                    }
+                    self.filtered.push(row);
                 }
-                if length == 32 && address == self.server {
-                    continue;
-                }
-                let mut row = MIB_IPFORWARD_ROW2::default();
-                // Windows supplies the route lifetimes and other default fields.
-                unsafe { InitializeIpForwardEntry(&mut row) };
-                row.InterfaceIndex = index;
-                row.DestinationPrefix.Prefix = ipv4_socket(address);
-                row.DestinationPrefix.PrefixLength = length;
-                row.NextHop = ipv4_socket(Ipv4Addr::UNSPECIFIED);
-                row.Metric = 1;
-                row.Protocol = MIB_IPPROTO_NETMGMT;
-                let result = unsafe { CreateIpForwardEntry2(&row) };
-                if result != 0 {
-                    return Err(format!(
-                        "Не удалось добавить маршрут {address}/{length}: {}",
-                        io::Error::from_raw_os_error(result as i32)
-                    ));
-                }
-                self.filtered.push(row);
-            }
+                Ok(())
+            })?;
         }
         Ok(())
     }
 
-    fn remove(&mut self) -> Result<(), String> {
+    fn remove_session_config(
+        &mut self,
+        address: Ipv4Addr,
+        full_tunnel: bool,
+    ) -> Result<(), String> {
+        let index = self.index;
+        self.remove_filtered_routes();
+        let mut script = format!(
+            "Get-NetRoute -InterfaceIndex {index} -PolicyStore ActiveStore | Where-Object {{ $_.RouteMetric -eq 1 }} | Remove-NetRoute -Confirm:$false;
+             Remove-NetIPAddress -InterfaceIndex {index} -IPAddress '{address}' -PolicyStore ActiveStore -Confirm:$false;"
+        );
+        if full_tunnel {
+            script.push_str(&format!(
+                "Remove-NetIPAddress -InterfaceIndex {index} -IPAddress 'fd53:5353:4856::2' -PolicyStore ActiveStore -Confirm:$false;
+                 Set-DnsClientServerAddress -InterfaceIndex {index} -ResetServerAddresses;"
+            ));
+        }
+        // Clean up the direct SSH exception even if clearing the tunnel interface fails.
+        let result = powershell(&script);
+        result.and(self.remove()).map(|_| ())
+    }
+
+    fn remove_filtered_routes(&mut self) {
         for row in self.filtered.drain(..).rev() {
             // The adapter also releases its routes when it is closed.
             unsafe { DeleteIpForwardEntry2(&row) };
         }
+    }
+
+    fn remove(&mut self) -> Result<(), String> {
+        self.remove_filtered_routes();
         if let Some((index, hop, metric)) = self.bypass {
             let server = self.server;
             powershell(&format!(

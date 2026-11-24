@@ -1,3 +1,4 @@
+use crate::ui::tr;
 use crate::{invites, Client};
 use eframe::egui;
 use std::thread::{self, JoinHandle};
@@ -49,8 +50,7 @@ fn moscow_time(value: &str) -> Option<String> {
     }
     Some(format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02} МСК",
-        moscow.wYear, moscow.wMonth, moscow.wDay,
-        moscow.wHour, moscow.wMinute, moscow.wSecond,
+        moscow.wYear, moscow.wMonth, moscow.wDay, moscow.wHour, moscow.wMinute, moscow.wSecond,
     ))
 }
 
@@ -59,28 +59,13 @@ fn access_row(
     entry: &invites::AccessEntry,
     confirming: Option<AccessChange>,
 ) -> AccessAction {
-    use crate::ui::{compact_pill, danger_pill, surface, BACKGROUND, MUTED};
+    use crate::ui::{background, compact_pill, danger_pill, muted};
     let expired = matches!(entry.state, invites::AccessState::Expired);
-    let (status, color, fill, change) = match entry.state {
-        invites::AccessState::Active => ("Активировано", 0x9fe0c1, 0x203b35, AccessChange::Revoke),
-        invites::AccessState::Pending => (
-            "Ожидает активации",
-            0xd0bcff,
-            0x2e2445,
-            AccessChange::Revoke,
-        ),
-        invites::AccessState::Expired => (
-            "Срок истёк",
-            0xbab3ce,
-            0x222135,
-            AccessChange::RemoveExpired,
-        ),
-        invites::AccessState::Revoked => (
-            "Доступ отозван",
-            0xbab3ce,
-            0x222135,
-            AccessChange::RemoveRevoked,
-        ),
+    let (status, change) = match entry.state {
+        invites::AccessState::Active => ("Активировано", AccessChange::Revoke),
+        invites::AccessState::Pending => ("Ожидает активации", AccessChange::Revoke),
+        invites::AccessState::Expired => ("Срок истёк", AccessChange::RemoveExpired),
+        invites::AccessState::Revoked => ("Доступ отозван", AccessChange::RemoveRevoked),
     };
     let revoked = matches!(change, AccessChange::RemoveRevoked);
     let action_label = if matches!(change, AccessChange::Revoke) {
@@ -88,132 +73,155 @@ fn access_row(
     } else {
         "Удалить"
     };
-    let rgb =
-        |value: u32| egui::Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8);
     let name = if entry.name.is_empty() {
         &entry.user
     } else {
         &entry.name
     };
     let moscow = entry.last_connected.as_deref().and_then(moscow_time);
-    let last = moscow.as_deref().or(entry.last_connected.as_deref()).unwrap_or(if expired {
-        "Ещё не подключался"
-    } else {
-        "Нет записи в журнале"
-    });
-    let mut action = AccessAction::None;
-    surface(BACKGROUND, 14, 11).show(ui, |ui| {
-        let width = ui.available_width();
-        ui.set_min_width(width);
-        let actions_width = 218.0;
-        let stacked = width < actions_width + 300.0;
-        let data_width = if stacked {
-            width
+    let last = moscow
+        .as_deref()
+        .or(entry.last_connected.as_deref())
+        .unwrap_or(if expired {
+            "Ещё не подключался"
         } else {
-            width - actions_width - 11.0
-        };
-        let (row, _) = ui.allocate_exact_size(egui::vec2(width, 49.0), egui::Sense::hover());
-        let first_width = (data_width - 12.0) * 0.51;
-        let column = |ui: &mut egui::Ui, x, width| {
-            ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(egui::Rect::from_min_size(
-                        row.min + egui::vec2(x, 3.0),
-                        egui::vec2(width, row.height()),
-                    ))
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            )
-        };
-        let mut recipient = column(ui, 0.0, first_width);
-        recipient
-            .add(egui::Label::new(egui::RichText::new(name).size(13.0).strong()).truncate())
-            .on_hover_text(&entry.user);
-        egui::Frame::new()
-            .fill(rgb(fill))
-            .corner_radius(12)
-            .inner_margin(egui::Margin::symmetric(8, 3))
-            .show(&mut recipient, |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(status).size(11.0).color(rgb(color)))
-                        .truncate(),
-                )
-                .on_hover_text(status);
-            });
-        let mut connection = column(ui, first_width + 12.0, data_width - first_width - 12.0);
-        connection.add(
-            egui::Label::new(
-                egui::RichText::new("Последнее подключение")
-                    .size(13.0)
-                    .color(MUTED),
-            )
-            .truncate(),
-        );
-        connection.horizontal(|ui| {
-            ui.set_min_height(20.0);
-            ui.add(egui::Label::new(egui::RichText::new(last).size(12.0)).truncate())
-                .on_hover_text(last);
+            "Нет записи в журнале"
         });
-        let mut actions = |ui: &mut egui::Ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if revoked {
-                let restore = ui
-                    .add_enabled_ui(entry.can_restore, |ui| {
-                        compact_pill(ui, "Восстановить", 108.0, false)
-                    })
-                    .inner;
-                if restore.clicked() {
-                    action = AccessAction::Ask(AccessChange::Restore);
-                } else if !entry.can_restore {
-                    restore
-                        .on_disabled_hover_text("Ключ не сохранился. Создайте новое приглашение.");
+    let mut action = AccessAction::None;
+    crate::ui::divider(ui);
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(0, 7))
+        .show(ui, |ui| {
+            let width = ui.available_width();
+            ui.set_min_width(width);
+            let actions_width = 80.0;
+            let stacked = width < actions_width + 300.0;
+            let data_width = if stacked {
+                width
+            } else {
+                width - actions_width - 11.0
+            };
+            let (row, _) = ui.allocate_exact_size(egui::vec2(width, 49.0), egui::Sense::hover());
+            let first_width = (data_width - 12.0) * 0.51;
+            let column = |ui: &mut egui::Ui, x, width| {
+                ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(
+                            row.min + egui::vec2(x, 3.0),
+                            egui::vec2(width, row.height()),
+                        ))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                )
+            };
+            let mut recipient = column(ui, 0.0, first_width);
+            recipient
+                .add(egui::Label::new(egui::RichText::new(name).size(14.0).strong()).truncate())
+                .on_hover_text(&entry.user);
+            let status_color = if matches!(entry.state, invites::AccessState::Active) {
+                crate::ui::mint()
+            } else {
+                muted()
+            };
+            recipient.add(
+                egui::Label::new(
+                    egui::RichText::new(tr(status))
+                        .size(12.0)
+                        .color(status_color),
+                )
+                .truncate(),
+            );
+            let mut connection = column(ui, first_width + 12.0, data_width - first_width - 12.0);
+            connection.add_space(9.0);
+            connection
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(tr(last))
+                            .monospace()
+                            .size(12.0)
+                            .color(muted()),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tr("Последнее подключение"));
+            let mut actions = |ui: &mut egui::Ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let icon = |ui: &mut egui::Ui, label, glyph, color| {
+                    let (rect, response, _) = crate::ui::control(ui, egui::vec2(36.0, 36.0), label);
+                    ui.painter().rect(
+                        rect,
+                        8,
+                        background(),
+                        egui::Stroke::new(1.0_f32, crate::ui::border()),
+                        egui::StrokeKind::Inside,
+                    );
+                    crate::ui::paint_action_icon(ui, rect.center(), glyph, color);
+                    response.on_hover_text(tr(label))
+                };
+                if revoked {
+                    let restore = ui
+                        .add_enabled_ui(entry.can_restore, |ui| {
+                            icon(ui, "Восстановить доступ", "Щит плюс", muted())
+                        })
+                        .inner;
+                    if restore.clicked() {
+                        action = AccessAction::Ask(AccessChange::Restore);
+                    } else if !entry.can_restore {
+                        restore.on_disabled_hover_text(
+                            "Ключ не сохранился. Создайте новое приглашение.",
+                        );
+                    }
                 }
-            }
-            if danger_pill(ui, action_label).clicked() {
-                action = AccessAction::Ask(change);
-            }
-        };
-        if stacked {
-            ui.add_space(2.0);
-            ui.horizontal_wrapped(&mut actions);
-        } else {
-            let buttons_width = if revoked { actions_width } else { 102.0 };
-            let mut buttons = column(ui, width - buttons_width, buttons_width);
-            buttons.add_space(3.5);
-            buttons.horizontal(&mut actions);
-        }
-        if let Some(change) = confirming {
-            let (question, label) = match change {
-                AccessChange::Revoke => ("Закрыть доступ этому пользователю?", "Отозвать"),
-                AccessChange::RemoveExpired => ("Удалить просроченное приглашение?", "Удалить"),
-                AccessChange::RemoveRevoked => (
-                    "Удалить запись пользователя без возможности восстановления?",
-                    "Удалить",
-                ),
-                AccessChange::Restore => {
-                    ("Восстановить доступ этому пользователю?", "Восстановить")
+                let glyph = if matches!(change, AccessChange::Revoke) {
+                    "Щит минус"
+                } else {
+                    "Удалить"
+                };
+                if icon(ui, action_label, glyph, crate::ui::error_color()).clicked() {
+                    action = AccessAction::Ask(change);
                 }
             };
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(4.0);
-            ui.label(question);
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                let confirm = if matches!(change, AccessChange::Restore) {
-                    compact_pill(ui, label, 108.0, true)
-                } else {
-                    danger_pill(ui, label)
+            if stacked {
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(&mut actions);
+            } else {
+                let buttons_width = if revoked { actions_width } else { 36.0 };
+                let mut buttons = column(ui, width - buttons_width, buttons_width);
+                buttons.add_space(3.5);
+                buttons.horizontal(&mut actions);
+            }
+            if let Some(change) = confirming {
+                let (question, label) = match change {
+                    AccessChange::Revoke => ("Закрыть доступ этому пользователю?", "Отозвать"),
+                    AccessChange::RemoveExpired => ("Удалить просроченное приглашение?", "Удалить"),
+                    AccessChange::RemoveRevoked => (
+                        "Удалить запись пользователя без возможности восстановления?",
+                        "Удалить",
+                    ),
+                    AccessChange::Restore => {
+                        ("Восстановить доступ этому пользователю?", "Восстановить")
+                    }
                 };
-                if confirm.clicked() {
-                    action = AccessAction::Confirm;
-                }
-                if compact_pill(ui, "Отмена", 90.0, false).clicked() {
-                    action = AccessAction::Cancel;
-                }
-            });
-        }
-    });
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.label(question);
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let confirm = if matches!(change, AccessChange::Restore) {
+                        compact_pill(ui, label, 108.0, true)
+                    } else {
+                        danger_pill(ui, label)
+                    };
+                    if confirm.clicked() {
+                        action = AccessAction::Confirm;
+                    }
+                    if compact_pill(ui, "Отмена", 90.0, false).clicked() {
+                        action = AccessAction::Cancel;
+                    }
+                });
+            }
+        });
     action
 }
 
@@ -259,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn access_rows_keep_compact_height_and_content_sized_badges() {
+    fn access_rows_keep_compact_height_and_show_status() {
         let ctx = egui::Context::default();
         let mut entry = invites::AccessEntry {
             user: "stv_0123456789abcdef".into(),
@@ -291,17 +299,8 @@ mod tests {
                     .inner
             },
         );
-        let badge = frame
-            .shapes
-            .iter()
-            .find_map(|shape| match &shape.shape {
-                egui::Shape::Rect(rect) if rect.fill == egui::Color32::from_rgb(32, 59, 53) => {
-                    Some(rect.rect)
-                }
-                _ => None,
-            })
-            .expect("active status badge");
-        assert!((40.0..140.0).contains(&badge.width()), "{badge:?}");
+        assert!(frame.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.job.text == "Активировано")));
     }
 }
 
@@ -321,6 +320,8 @@ enum Completion {
 
 #[derive(Default)]
 pub struct InviteUi {
+    share_request: bool,
+    credential_request: Option<(bool, bool, bool)>,
     operation: Option<Operation>,
     worker: Option<JoinHandle<Result<Completion, String>>>,
     result: Option<Completion>,
@@ -337,6 +338,10 @@ pub struct InviteUi {
 }
 
 impl InviteUi {
+    pub(crate) fn take_share_request(&mut self) -> bool {
+        std::mem::take(&mut self.share_request)
+    }
+
     pub fn manage(directory: Option<&Path>, server: &str) -> Self {
         let result = directory
             .and_then(|directory| Self::read_access_cache(directory).remove(server))
@@ -394,9 +399,9 @@ impl InviteUi {
 
     pub fn refresh_if_stale(&mut self) {
         if self.worker.is_none()
-            && self.last_access_fetch.is_none_or(|time| {
-                time.elapsed() >= std::time::Duration::from_secs(20)
-            })
+            && self
+                .last_access_fetch
+                .is_none_or(|time| time.elapsed() >= std::time::Duration::from_secs(20))
         {
             self.refresh();
         }
@@ -417,6 +422,7 @@ impl InviteUi {
         ctx: &egui::Context,
         client: &mut Client,
         inline: Option<&mut egui::Ui>,
+        import_height: Option<f32>,
     ) {
         let Some(operation) = self.operation else {
             return;
@@ -487,7 +493,8 @@ impl InviteUi {
         if self.worker.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        let mut start = self.worker.is_none() && std::mem::take(&mut self.load_access);
+        let mut automatic = self.worker.is_none() && std::mem::take(&mut self.load_access);
+        let mut start = automatic;
         let mut update = false;
         let mut revoke = false;
         let mut save_import = false;
@@ -506,16 +513,20 @@ impl InviteUi {
                 ui.horizontal(|ui| {
                     ui.set_min_height(32.0);
                     ui.label(
-                        egui::RichText::new("Выданные приглашения")
-                            .size(16.0)
+                        egui::RichText::new(tr("Выданные приглашения"))
+                            .size(15.0)
                             .strong(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::ui::compact_pill(ui, "Добавить", 98.0, true).clicked() {
+                            self.share_request = true;
+                        }
                         if ui
                             .add_enabled_ui(self.worker.is_none(), |ui| crate::ui::refresh_icon(ui))
                             .inner
                             .clicked()
                         {
+                            automatic = false;
                             start = true;
                         }
                         if self.worker.is_some() {
@@ -526,7 +537,7 @@ impl InviteUi {
             }
             if self.worker.is_some() && operation != Operation::Manage {
                 ui.spinner();
-                ui.label("Выполняется запрос по SSH…");
+                ui.label(tr("Выполняется запрос по SSH…"));
             } else {
                 match &self.result {
                     Some(Completion::Shared(invite)) => {
@@ -534,11 +545,11 @@ impl InviteUi {
                         crate::ui::badge(ui, "Одноразовое · 30 минут", false);
                         ui.add_space(4.0);
                         ui.label(
-                            egui::RichText::new("Отправьте приглашение только получателю.")
-                                .color(crate::ui::MUTED),
+                            egui::RichText::new(tr("Отправьте приглашение только получателю."))
+                                .color(crate::ui::muted()),
                         );
                         ui.add_space(8.0);
-                        crate::ui::surface(crate::ui::BACKGROUND, 12, 12).show(ui, |ui| {
+                        crate::ui::surface(crate::ui::background(), 12, 12).show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.set_min_height(40.0);
@@ -558,7 +569,7 @@ impl InviteUi {
                     }
                     Some(Completion::Imported(imported)) => {
                         ui.strong(&imported.profile.name);
-                        ui.label("Приглашение активировано. После сохранения выберите SOCKS5 или System VPN (IPv4).");
+                        ui.label(tr("Приглашение активировано. После сохранения выберите SOCKS5 или System VPN (IPv4)."));
                         if crate::ui::pill(ui, "Сохранить профиль", 177.0, true).clicked()
                         {
                             save_import = true;
@@ -567,12 +578,9 @@ impl InviteUi {
                     Some(Completion::AccessChanged(_)) => {}
                     Some(Completion::Access(entries, _)) => {
                         if entries.is_empty() {
-                            ui.label("Приглашений пока нет.");
+                            ui.label(tr("Приглашений пока нет."));
                         }
-                        for (index, entry) in entries.iter().enumerate() {
-                            if index > 0 {
-                                ui.add_space(5.0);
-                            }
+                        for entry in entries {
                             let confirming = self
                                 .revoke_user
                                 .as_ref()
@@ -595,13 +603,18 @@ impl InviteUi {
                     }
                     None => {
                         if operation == Operation::Import {
+                            let legacy = invites::needs_legacy_code(&self.encoded);
+                            let field_height = import_height.map_or(0.0, |height| {
+                                (height - if legacy { 124.0 } else { 42.0 }).max(0.0)
+                            });
                             crate::ui::form_field(
                                 ui,
                                 "Строка приглашения",
                                 egui::TextEdit::multiline(&mut self.encoded)
                                     .desired_rows(3)
+                                    .min_size(egui::vec2(0.0, field_height))
                                     .hint_text("ssh-tunnel-invite-1:…")
-                                    .font(egui::FontId::monospace(14.0)),
+                                    .font(egui::FontId::monospace(12.0)),
                             );
                             if invites::needs_legacy_code(&self.encoded) {
                                 ui.add_space(8.0);
@@ -619,7 +632,7 @@ impl InviteUi {
                                     egui::RichText::new(
                                         "Одноразовое приглашение действует 30 минут.",
                                     )
-                                    .color(crate::ui::MUTED),
+                                    .color(crate::ui::muted()),
                                 );
                                 ui.add_space(8.0);
                                 crate::ui::field(
@@ -646,7 +659,7 @@ impl InviteUi {
                                 }
                             }
                         }
-                        if operation != Operation::Manage {
+                        if operation != Operation::Manage && import_height.is_none() {
                             ui.add_space(12.0);
                             ui.horizontal_wrapped(|ui| {
                                 start = if operation == Operation::Share {
@@ -661,32 +674,24 @@ impl InviteUi {
                     }
                 }
                 if operation == Operation::Manage {
-                    if self
-                        .error
-                        .as_deref()
-                        .is_some_and(|error| error != invites::UPDATE_REQUIRED)
-                    {
-                        crate::ui::field(
-                            ui,
-                            "Пароль SSH или фраза ключа",
-                            &mut self.ssh_secret,
-                            "Если требуется",
-                            true,
-                        );
-                        ui.add_space(6.0);
-                    }
                     if self.server_update_required {
                         update = ui
                             .add_enabled_ui(self.worker.is_none(), |ui| {
                                 crate::ui::pill(ui, "Обновить сервер", 154.0, true).clicked()
                             })
                             .inner;
-                    } else if self.result.is_none() && self.error.is_none() {
-                        ui.label("Загружаем приглашения…");
+                    } else if self.result.is_none() {
+                        ui.label(tr(if self.error.is_none() {
+                            "Загружаем приглашения…"
+                        } else {
+                            "Нажмите «Обновить список», чтобы загрузить приглашения."
+                        }));
                     }
                 }
-                if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                if operation != Operation::Manage {
+                    if let Some(error) = &self.error {
+                        ui.colored_label(crate::ui::error_color(), error);
+                    }
                 }
                 if matches!(self.result, Some(Completion::Shared(_))) {
                     ui.add_space(12.0);
@@ -697,7 +702,23 @@ impl InviteUi {
             }
         };
         let dismiss = if let Some(ui) = inline {
-            body(ui);
+            if let Some(height) = import_height {
+                egui::ScrollArea::vertical()
+                    .id_salt("profile-import")
+                    .auto_shrink([false, false])
+                    .max_height(height)
+                    .show(ui, &mut body);
+                ui.add_space(10.0);
+                let ready = self.worker.is_none() && self.result.is_none();
+                ui.add_enabled_ui(ready, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        start = crate::ui::form_action(ui, "Активировать", 136.0, true).clicked();
+                        close = crate::ui::form_action(ui, "Отмена", 90.0, false).clicked();
+                    });
+                });
+            } else {
+                body(ui);
+            }
             false
         } else {
             egui::Modal::new(egui::Id::new("invitation"))
@@ -733,6 +754,42 @@ impl InviteUi {
                 }
             }
         }
+        if let Some(request) = self.credential_request {
+            let prompt = egui::Modal::new(egui::Id::new("access-credential"))
+                .frame(crate::ui::dialog_frame())
+                .show(ctx, |ui| {
+                    ui.set_width(350.0);
+                    ui.heading(tr("Пароль SSH или фраза ключа"));
+                    ui.add_space(8.0);
+                    crate::ui::field(
+                        ui,
+                        "Пароль SSH или фраза ключа",
+                        &mut self.ssh_secret,
+                        "Если требуется",
+                        true,
+                    );
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let submit = ui
+                            .add_enabled_ui(!self.ssh_secret.is_empty(), |ui| {
+                                crate::ui::pill(ui, "Продолжить", 122.0, true)
+                            })
+                            .inner
+                            .clicked();
+                        let cancel = crate::ui::pill(ui, "Отмена", 90.0, false).clicked();
+                        (submit, cancel)
+                    })
+                    .inner
+                });
+            if prompt.inner.0 {
+                self.credential_request = None;
+                (start, revoke, update) = request;
+                automatic = false;
+            } else if prompt.inner.1 || prompt.should_close() {
+                self.credential_request = None;
+                self.ssh_secret.clear();
+            }
+        }
         if (start || revoke || update) && self.worker.is_none() {
             self.error = None;
             if operation == Operation::Import {
@@ -763,8 +820,17 @@ impl InviteUi {
                     match Client::connection_secret(&profile) {
                         Ok(secret) => secret,
                         Err(error) => {
-                            client.report(Err(error.clone()), None);
-                            self.error = Some(error);
+                            if operation == Operation::Manage {
+                                if !automatic || revoke || update {
+                                    self.credential_request = Some((start, revoke, update));
+                                    ctx.request_repaint();
+                                } else if self.result.is_none() {
+                                    self.error = Some(error);
+                                }
+                            } else {
+                                client.report(Err(error.clone()), None);
+                                self.error = Some(error);
+                            }
                             return;
                         }
                     }
@@ -790,10 +856,12 @@ impl InviteUi {
                             AccessChange::RemoveRevoked => "Запись пользователя удалена.",
                             AccessChange::Restore => "Доступ восстановлен.",
                         };
-                        Ok(match invites::change_access(&profile, secret, user, change)? {
-                            Some(entries) => Completion::Access(entries, Some(message)),
-                            None => Completion::AccessChanged(message),
-                        })
+                        Ok(
+                            match invites::change_access(&profile, secret, user, change)? {
+                                Some(entries) => Completion::Access(entries, Some(message)),
+                                None => Completion::AccessChanged(message),
+                            },
+                        )
                     } else {
                         invites::list(&profile, secret)
                             .map(|entries| Completion::Access(entries, None))

@@ -6,19 +6,257 @@ use eframe::egui::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub(crate) const BACKGROUND: Color32 = Color32::from_rgb(16, 19, 26);
-const RAIL: Color32 = Color32::from_rgb(24, 29, 39);
-const CARD: Color32 = RAIL;
-const ROW: Color32 = Color32::from_rgb(36, 44, 57);
-const BORDER: Color32 = Color32::from_rgb(51, 61, 80);
-const TEXT: Color32 = Color32::from_rgb(242, 244, 252);
-pub(crate) const MUTED: Color32 = Color32::from_rgb(173, 184, 205);
-const LAVENDER: Color32 = Color32::from_rgb(202, 186, 255);
-const MINT: Color32 = Color32::from_rgb(158, 231, 197);
-const PRIMARY: Color32 = LAVENDER;
-const HOVER: Color32 = Color32::from_rgb(41, 37, 62);
-const SOFT: Color32 = Color32::from_rgb(46, 36, 69);
-pub(crate) const ERROR: Color32 = Color32::from_rgb(255, 180, 189);
+thread_local! {
+    static LIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ENGLISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn palette(dark: u32, light: u32) -> Color32 {
+    let value = if LIGHT.get() { light } else { dark };
+    Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
+}
+
+pub(crate) fn background() -> Color32 {
+    palette(0x0c1218, 0xecf1f4)
+}
+fn rail() -> Color32 {
+    palette(0x101a23, 0xf8fafb)
+}
+fn card() -> Color32 {
+    palette(0x131e29, 0xffffff)
+}
+fn row() -> Color32 {
+    palette(0x192836, 0xedf3f7)
+}
+pub(crate) fn border() -> Color32 {
+    palette(0x2b3b49, 0xd4dfe6)
+}
+fn text_color() -> Color32 {
+    palette(0xecf4fa, 0x172a37)
+}
+pub(crate) fn muted() -> Color32 {
+    palette(0xa2b4c3, 0x506678)
+}
+fn accent() -> Color32 {
+    palette(0xc8f277, 0xc8ed82)
+}
+pub(crate) fn mint() -> Color32 {
+    palette(0xa7e7bc, 0x22623e)
+}
+fn hover_color() -> Color32 {
+    palette(0x223445, 0xe3edf4)
+}
+fn soft() -> Color32 {
+    palette(0x192836, 0xedf3f7)
+}
+pub(crate) fn error_color() -> Color32 {
+    palette(0xffadb3, 0xa83141)
+}
+
+pub(crate) fn tr(label: &str) -> &str {
+    if !ENGLISH.get() {
+        return label;
+    }
+    match label {
+        "0.4.21 · Макет" => "0.4.21 · Preview",
+        "Профили" => "Profiles",
+        "Новый профиль" => "New profile",
+        "Поделиться" => "Share",
+        "Туннель" => "Tunnel",
+        "Светлая тема" => "Light theme",
+        "Тёмная тема" => "Dark theme",
+        "Проверить обновления" => "Check for updates",
+        "Управление подключением" => "Connection controls",
+        "Режим подключения" => "Connection mode",
+        "Настройки профиля" => "Profile settings",
+        "Закрыть уведомление" => "Dismiss notification",
+        "Состояние подключения" => "Connection status",
+        "Не подключено" => "Disconnected",
+        "Подключение…" => "Connecting…",
+        "Подключено" => "Connected",
+        "Отключение…" => "Disconnecting…",
+        "Подключение" => "Connection",
+        "Пользователи" => "Users",
+        "Маршрутизация" => "Routing",
+        "IPv4 · IP из РФ напрямую" => "IPv4 · Bypass Russian IPs",
+        "Весь IPv4" => "All IPv4",
+        "Список CIDR" => "CIDR list",
+        "По приложениям" => "Per app",
+        "Приглашение" => "Invitation",
+        "Сервер SSH" => "SSH server",
+        "Вход" => "Sign-in",
+        "По приглашению" => "By invitation",
+        "Параметры профиля" => "Profile details",
+        "Редактировать" => "Edit",
+        "Переименовать" => "Rename",
+        "Выданные приглашения" => "Issued invitations",
+        "Обновить список" => "Refresh list",
+        "Пригласить" => "Invite",
+        "Последнее подключение" => "Last connected",
+        "Отозвать доступ" => "Revoke access",
+        "Восстановить доступ" => "Restore access",
+        "Добавить" => "Add",
+        "Удалить запись" => "Delete entry",
+        "Активировано" => "Activated",
+        "Ожидает активации" => "Awaiting activation",
+        "Доступ отозван" => "Access revoked",
+        "Срок истёк" => "Expired",
+        "Приглашений пока нет." => "No invitations yet.",
+        "Доступно обновление сервера" => "Server update available",
+        "Обновить сервер" => "Update server",
+        "Доступно в режиме System VPN (IPv4)." => {
+            "Available in System VPN (IPv4) mode."
+        }
+        "IPv4-диапазоны" => "IPv4 ranges",
+        "Запущенные" => "Running apps",
+        "Выбрать .exe" => "Select an .exe",
+        "Убрать приложение" => "Remove app",
+        "TCP через SSH · UDP блокируется" => "TCP over SSH · UDP blocked",
+        "IP из РФ напрямую" => "Bypass Russian IPs",
+        "Исключить российские IPv4 из VPN" => {
+            "Route Russian IPv4 addresses outside the VPN"
+        }
+        "Маршрутизация IPv4" => "IPv4 routing",
+        "Диапазон пересекается с демосписком исключений." => {
+            "This range overlaps a demo exclusion."
+        }
+        "Отключите VPN для изменения маршрутов." => {
+            "Disconnect the VPN to change routes."
+        }
+        "Отмена" => "Cancel",
+        "Сохранить" => "Save",
+        "Закрыть" => "Close",
+        "Редактировать профиль" => "Edit profile",
+        "Способ добавления" => "Add profile method",
+        "Подключение к серверу" => "Server connection",
+        "Имя профиля" => "Profile name",
+        "Строка приглашения" => "Invitation code",
+        "Код расшифровки" => "Decryption code",
+        "Адрес SSH" => "SSH address",
+        "Имя пользователя" => "Username",
+        "Способ входа" => "Sign-in method",
+        "Пароль SSH" => "SSH password",
+        "SSH-ключ" => "SSH key",
+        "Файл приватного ключа" => "Private key file",
+        "Файл не выбран" => "No file selected",
+        "Выбрать" => "Choose",
+        "Выбрать файл приватного ключа" => "Choose a private key file",
+        "Парольная фраза" => "Passphrase",
+        "Активировать" => "Activate",
+        "Поделиться доступом" => "Share access",
+        "Копировать" => "Copy",
+        "Одноразовое · 30 минут" => "Single-use · 30 minutes",
+        "Готово" => "Done",
+        "Имя получателя" => "Recipient name",
+        "Создать приглашение" => "Create invitation",
+        "Доступно обновление" => "Update available",
+        "Скачиваем обновление…" => "Downloading update…",
+        "Отключите туннель перед обновлением." => {
+            "Disconnect the tunnel before updating."
+        }
+        "Текущая версия" => "Current version",
+        "Новая версия" => "New version",
+        "Позже" => "Later",
+        "Обновить" => "Update",
+        "Запущенные приложения" => "Running apps",
+        "Поиск" => "Search",
+        "Имя приложения" => "App name",
+        "Добавить выбранные" => "Add selected",
+        "Отозвать" => "Revoke",
+        "Восстановить" => "Restore",
+        "Удалить" => "Delete",
+        "Отозвать доступ?" => "Revoke access?",
+        "Восстановить доступ?" => "Restore access?",
+        "Удалить доступ?" => "Delete access?",
+        "Приглашение скопировано" => "Invitation copied",
+        "Копирование недоступно" => "Clipboard unavailable",
+        "Список обновлён" => "List refreshed",
+        "Сервер обновлён" => "Server updated",
+        "Запись удалена" => "Entry deleted",
+        "Доступ восстановлен" => "Access restored",
+        "Маршрутизация сохранена" => "Routing saved",
+        "Обновление готово к установке" => "Update ready to install",
+        "Введите имя профиля" => "Enter a profile name",
+        "Профиль сохранён" => "Profile saved",
+        "Заполните имя, адрес и пользователя" => {
+            "Enter the name, address and username"
+        }
+        "Приглашение активировано" => "Invitation activated",
+        "Настройка сервера" => "Server setup",
+        "Подготавливаем VPN и приглашения…" => {
+            "Preparing VPN and invitations…"
+        }
+        "Сегодня, 14:32 МСК" => "Today, 14:32 MSK",
+        "Вчера, 19:08 МСК" => "Yesterday, 19:08 MSK",
+        "Настройка адаптера" => "Setting up adapter",
+        "Выберите профиль или создайте новый." => {
+            "Choose a profile or add one."
+        }
+        "Управление приглашениями доступно в профиле владельца сервера." => {
+            "Invitation management is available to server owners."
+        }
+        "Маршрутизация доступна в режиме System VPN (IPv4)." => {
+            "Routing is available in System VPN (IPv4) mode."
+        }
+        "Весь IPv4-трафик" => "All IPv4 traffic",
+        "IPv4 без IP из РФ" => "IPv4 excluding Russian IPs",
+        "Выбранные приложения" => "Selected apps",
+        "Локальный прокси" => "Local proxy",
+        "Нет сохранённых профилей" => "No saved profiles",
+        "Пароль SSH сохранён" => "SSH password saved",
+        "Отменить изменения" => "Discard changes",
+        "Удалить профиль" => "Delete profile",
+        "Исключение РФ Зоны" => "Bypass Russian IPs",
+        "Скачиваю обновление…" => "Downloading update…",
+        "Проверяю обновления…" => "Checking for updates…",
+        "Выбрать файл (.exe)" => "Select an .exe",
+        "Выбрано не было" => "No profile selected",
+        "Выполняется запрос по SSH…" => "Sending SSH request…",
+        "Импортировать приглашение" => "Import invitation",
+        "Введите пароль" => "Enter password",
+        "Введите парольную фразу" => "Enter passphrase",
+        "Укажите путь к ключу" => "Enter the key path",
+        "Выбрать файл" => "Choose file",
+        "Копировать адрес прокси" => "Copy proxy address",
+        "Необязательно" => "Optional",
+        "Если требуется" => "If required",
+        "Забыть пароль" => "Forget password",
+        "Пароль сохранён. Введите новый, чтобы заменить его." => {
+            "A password is saved. Enter a new one to replace it."
+        }
+        "Локальный порт SOCKS5" => "Local SOCKS5 port",
+        "Редактирование профиля" => "Edit profile",
+        "Подготавливаем VPN и приглашения по SSH…" => {
+            "Setting up VPN and invitations over SSH…"
+        }
+        "Через туннель пойдёт TCP-трафик выбранных программ. UDP блокируется." => {
+            "Selected apps use SSH for TCP. UDP is blocked."
+        }
+        "Приложения пока не выбраны" => "No apps selected",
+        "Через VPN идут только указанные диапазоны IPv4." => {
+            "Only the listed IPv4 ranges use the VPN."
+        }
+        "Через VPN пойдёт весь IPv4-трафик устройства." => {
+            "All IPv4 traffic uses the VPN."
+        }
+        "VPN обслуживает весь IPv4-трафик за пределами исключённых диапазонов." => {
+            "All IPv4 traffic outside the exclusions uses the VPN."
+        }
+        "Загрузка списка IPv4 РФ…" => "Loading Russian IPv4 ranges…",
+        "Используется резервный список IPv4 от IPdeny." => {
+            "Using the IPdeny fallback list."
+        }
+        "Повторить" => "Retry",
+        "Нет записи в журнале" => "No log entry",
+        "Ещё не подключался" => "Never connected",
+        "Убрать выбранные приложения" => "Remove selected apps",
+        "Пароль SSH или фраза ключа" => "SSH password or key passphrase",
+        "Профиль сохранён." => "Profile saved.",
+        "Установлена последняя версия." => "You are up to date.",
+        _ => label,
+    }
+}
+
 const HOVER_DURATION: f32 = 0.16;
 
 struct Artwork {
@@ -82,7 +320,7 @@ impl Assets {
             };
         }
         Ok(Self {
-            mark: asset!("shield"),
+            mark: asset!("flow-22"),
             server: asset!("server"),
             close: asset!("close"),
         })
@@ -131,7 +369,7 @@ fn paint_toast_content(ui: &mut Ui, toast: &Toast, color: Color32) -> bool {
     let galley = ui.painter().layout(
         toast.message.clone(),
         FontId::proportional(14.0),
-        TEXT,
+        text_color(),
         text_width,
     );
     let text_height = galley.size().y;
@@ -147,7 +385,7 @@ fn paint_toast_content(ui: &mut Ui, toast: &Toast, color: Color32) -> bool {
         ui.painter().galley(
             pos2(row.left() + 26.0, row.center().y - text_height / 2.0),
             galley,
-            TEXT,
+            text_color(),
         );
     } else {
         let mut text_ui = ui.new_child(
@@ -172,8 +410,8 @@ fn paint_toast_content(ui: &mut Ui, toast: &Toast, color: Color32) -> bool {
     );
     let (rect, response, hover) = control(&mut close_ui, close.size(), "Закрыть уведомление");
     ui.painter()
-        .rect_filled(rect, 8.0, HOVER.gamma_multiply(hover));
-    paint_action_icon(ui, rect.center(), "×", MUTED);
+        .rect_filled(rect, 8.0, hover_color().gamma_multiply(hover));
+    paint_action_icon(ui, rect.center(), "×", muted());
     response.on_hover_text("Закрыть уведомление").clicked()
 }
 
@@ -185,7 +423,16 @@ enum UpdateJob {
     Download(JoinHandle<Result<std::path::PathBuf, String>>),
 }
 
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Appearance {
+    light: bool,
+    english: bool,
+    last: Option<(String, String)>,
+}
+
 pub struct Desktop {
+    appearance: Appearance,
     client: Client,
     new_profile_editor: Option<Client>,
     profile_setup: Option<JoinHandle<Result<crate::SavedProfile, String>>>,
@@ -212,16 +459,14 @@ pub struct Desktop {
 
 impl Desktop {
     pub fn new(ctx: &egui::Context, client: Client) -> std::io::Result<Self> {
-        let mut visuals = egui::Visuals::dark();
-        visuals.override_text_color = Some(TEXT);
-        visuals.extreme_bg_color = BACKGROUND;
-        visuals.selection.bg_fill = HOVER;
-        visuals.widgets.inactive.bg_fill = ROW;
-        visuals.widgets.inactive.weak_bg_fill = ROW;
-        visuals.widgets.hovered.bg_fill = HOVER;
-        visuals.widgets.hovered.weak_bg_fill = HOVER;
-        visuals.widgets.active.bg_fill = HOVER;
-        ctx.set_visuals(visuals);
+        let appearance = client
+            .directory
+            .as_ref()
+            .ok()
+            .and_then(|directory| std::fs::read(directory.join("appearance.json")).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Self::apply_appearance(ctx, &appearance);
         let mut fonts = egui::FontDefinitions::default();
         for (name, family, data) in [
             (
@@ -249,12 +494,14 @@ impl Desktop {
             for (role, size) in [
                 (egui::TextStyle::Body, 14.0),
                 (egui::TextStyle::Small, 12.0),
-                (egui::TextStyle::Heading, 22.0),
+                (egui::TextStyle::Heading, 21.0),
+                (egui::TextStyle::Button, 14.0),
             ] {
                 style.text_styles.insert(role, FontId::proportional(size));
             }
         });
         Ok(Self {
+            appearance,
             client,
             new_profile_editor: None,
             profile_setup: None,
@@ -280,221 +527,328 @@ impl Desktop {
         })
     }
 
-    fn sidebar(&mut self, ui: &mut Ui, height: f32) {
-        rounded(RAIL, 20, 18).show(ui, |ui| {
-            ui.set_width(208.0);
-            let (brand, _) = ui.allocate_exact_size(vec2(208.0, 42.0), Sense::hover());
-            ui.painter()
-                .rect_filled(Rect::from_min_size(brand.min, vec2(40.0, 40.0)), 12.0, SOFT);
-            self.assets.mark.draw(ui, brand.min + vec2(9.0, 9.0));
-            slot_text(
-                ui,
-                Rect::from_min_size(brand.min + vec2(52.0, 1.0), vec2(156.0, 26.0)),
-                RichText::new("SSH Tunnel").size(20.0).strong(),
-            );
-            text(
-                ui,
-                brand.min + vec2(52.0, 26.0),
-                "Клиент для Windows",
-                11.0,
-                MUTED,
-            );
-            ui.add_space(21.0);
-            let stopping = self.client.disconnecting.is_some();
-            let (header, _) = ui.allocate_exact_size(vec2(208.0, 34.0), Sense::hover());
-            slot_text(
-                ui,
-                Rect::from_min_size(header.min + vec2(0.0, 6.0), vec2(165.0, 25.0)),
-                RichText::new("Профили").size(18.0).strong(),
-            );
-            let mut add_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(Rect::from_min_size(
-                        header.right_top() - vec2(28.0, 0.0),
-                        vec2(28.0, 28.0),
-                    ))
-                    .layout(Layout::top_down(Align::Min)),
-            );
-            let add = add_ui.add_enabled_ui(!stopping && self.client.directory.is_ok(), |ui| {
-                let (rect, response, hover) = control(ui, vec2(28.0, 28.0), "Новый профиль");
-                let center = rect.center();
-                let color = mix(TEXT, LAVENDER, hover);
-                let stroke = Stroke::new(1.5_f32, color);
-                ui.painter()
-                    .rect_filled(rect, 7.0, HOVER.gamma_multiply(hover));
-                ui.painter().rect_stroke(
-                    Rect::from_center_size(center, vec2(12.0, 12.0)),
-                    2.0,
-                    stroke,
-                    StrokeKind::Inside,
-                );
-                for offset in [vec2(3.0, 0.0), vec2(0.0, 3.0)] {
-                    ui.painter()
-                        .line_segment([center - offset, center + offset], stroke);
-                }
-                response.on_hover_text("Новый профиль").clicked()
-            });
-            if add.inner {
-                if self.client.tunnel.is_some() {
-                    self.new_profile_editor = Some(self.client.new_profile_editor());
-                } else {
-                    let result = self.client.select(None);
-                    if result.is_ok() {
-                        self.routing = None;
-                        self.running_apps.close();
-                        self.client.editing = true;
-                    }
-                    self.client.report(result, None);
-                }
-            }
-            let (divider, _) = ui.allocate_exact_size(vec2(208.0, 1.0), Sense::hover());
-            ui.painter()
-                .rect_filled(divider, 0.0, BORDER.gamma_multiply(0.45));
-            ui.add_space(8.0);
+    fn apply_appearance(ctx: &egui::Context, appearance: &Appearance) {
+        LIGHT.set(appearance.light);
+        ENGLISH.set(appearance.english);
+        let mut visuals = if appearance.light {
+            egui::Visuals::light()
+        } else {
+            egui::Visuals::dark()
+        };
+        visuals.panel_fill = card();
+        visuals.window_fill = card();
+        visuals.window_stroke = Stroke::new(1.0_f32, border());
+        visuals.override_text_color = Some(text_color());
+        visuals.extreme_bg_color = background();
+        visuals.selection.bg_fill = hover_color();
+        visuals.widgets.inactive.bg_fill = row();
+        visuals.widgets.inactive.weak_bg_fill = row();
+        visuals.widgets.hovered.bg_fill = hover_color();
+        visuals.widgets.hovered.weak_bg_fill = hover_color();
+        visuals.widgets.active.bg_fill = hover_color();
+        ctx.set_visuals(visuals);
+    }
 
-            let mut selected = None;
-            let mut editing = None;
-            let list_height = (height - 302.0).max(92.0);
-            egui::ScrollArea::vertical()
-                .max_height(list_height)
-                .show(ui, |ui| {
-                    if self.client.profiles.entries.is_empty() {
-                        ui.label(RichText::new("Нет сохранённых профилей").color(MUTED));
-                    }
-                    for (index, profile) in self.client.profiles.entries.iter().enumerate() {
-                        let manageable = self.client.can_edit_profile(index);
-                        ui.add_enabled_ui(self.client.directory.is_ok(), |ui| {
-                            ui.push_id(index, |ui| {
-                                let (rect, response, hover) =
-                                    control(ui, vec2(208.0, 60.0), &profile.name);
-                                let current = self.client.profiles.selected == Some(index);
-                                ui.painter().rect(
-                                    rect,
-                                    15.0,
-                                    mix(if current { HOVER } else { BACKGROUND }, ROW, hover),
-                                    Stroke::new(
-                                        1.0_f32,
-                                        mix(
-                                            if current {
-                                                Color32::from_rgb(105, 85, 154)
-                                            } else {
-                                                BORDER
-                                            },
-                                            LAVENDER,
-                                            hover,
-                                        ),
-                                    ),
-                                    StrokeKind::Inside,
-                                );
-                                self.assets.server.draw_tinted(
-                                    ui,
-                                    rect.right_center() - vec2(34.0, 10.0),
-                                    if current { LAVENDER } else { TEXT },
-                                );
-                                let label_rect = Rect::from_min_max(
-                                    rect.min + vec2(14.0, 11.0),
-                                    rect.max - vec2(42.0, 27.0),
-                                );
-                                slot_text(
-                                    ui,
-                                    label_rect,
-                                    if current {
-                                        RichText::new(&profile.name).size(15.0).strong()
-                                    } else {
-                                        RichText::new(&profile.name).size(15.0)
-                                    },
-                                );
-                                let detail = match profile.mode {
-                                    Mode::SystemVpn => "IPv4 · SSH",
-                                    Mode::Socks5 => "SOCKS5 · SSH",
-                                };
-                                text(ui, rect.min + vec2(14.0, 34.0), detail, 12.0, MUTED);
-                                if manageable {
-                                    response.context_menu(|ui| {
-                                        if pill(ui, "Редактировать профиль", 205.0, false).clicked()
-                                        {
-                                            editing = Some(index);
-                                            ui.close_menu();
-                                        }
-                                    });
-                                }
-                                if manageable && response.double_clicked() {
-                                    editing = Some(index);
-                                } else {
-                                    let hint = if manageable {
-                                        format!(
-                                            "{}\nПравый клик — редактировать профиль",
-                                            profile.connection.server
-                                        )
-                                    } else {
-                                        profile.connection.server.clone()
-                                    };
-                                    if response.on_hover_text(hint).clicked() {
-                                        selected = Some(index);
-                                    }
-                                }
-                            })
-                        });
-                        ui.add_space(9.0);
-                    }
-                });
-            ui.add_space(8.0);
-            let remaining = ui.max_rect().bottom() - ui.cursor().top();
-            ui.add_space((remaining - 67.0).max(12.0));
-            ui.label(
-                RichText::new(concat!("Версия ", env!("CARGO_PKG_VERSION")))
-                    .size(12.0)
-                    .color(MUTED),
-            );
-            ui.add_space(5.0);
-            let update_label = match self.update {
-                Some(UpdateJob::Check { .. }) => "Проверяю обновления…",
-                Some(UpdateJob::Download(_)) => "Скачиваю обновление…",
-                None => "Проверить обновления",
-            };
-            ui.add_enabled_ui(
-                self.update.is_none() && self.client.tunnel.is_none() && !stopping,
-                |ui| {
-                    if pill(ui, update_label, 183.0, false).clicked() {
+    fn save_appearance(&self) {
+        let Ok(directory) = &self.client.directory else {
+            return;
+        };
+        if std::fs::create_dir_all(directory).is_err() {
+            return;
+        }
+        let Ok(mut file) = tempfile::NamedTempFile::new_in(directory) else {
+            return;
+        };
+        if serde_json::to_writer(&mut file, &self.appearance).is_ok() {
+            let _ = file.persist(directory.join("appearance.json"));
+        }
+    }
+
+    fn last_profile_index(&self) -> Option<usize> {
+        let (name, server) = self.appearance.last.as_ref()?;
+        self.client
+            .profiles
+            .entries
+            .iter()
+            .position(|profile| &profile.name == name && &profile.connection.server == server)
+    }
+
+    fn change_connection(&mut self, index: Option<usize>) {
+        let result = if self.client.tunnel.is_some() {
+            self.client.toggle_connection()
+        } else if let Some(index) = index {
+            self.client.connect_profile(index)
+        } else {
+            self.client.editing = true;
+            Ok(())
+        };
+        self.client.report(result, None);
+    }
+
+    fn new_profile(&mut self) {
+        if self.client.tunnel.is_some() {
+            self.new_profile_editor = Some(self.client.new_profile_editor());
+        } else {
+            let result = self.client.select(None);
+            if result.is_ok() {
+                self.routing = None;
+                self.running_apps.close();
+                self.client.editing = true;
+            }
+            self.client.report(result, None);
+        }
+    }
+
+    fn appbar(&mut self, ui: &mut Ui) {
+        rounded(rail(), 0, 12)
+            .inner_margin(egui::Margin::symmetric(24, 13))
+            .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (logo, _) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
+                self.assets.mark.draw(ui, logo.min);
+                ui.label(RichText::new("SSH Tunnel").size(17.0).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let stopping = self.client.disconnecting.is_some();
+                    let ready = self.client.tunnel.as_ref().is_some_and(Connection::is_ready);
+                    let busy = stopping || (self.client.tunnel.is_some() && !ready);
+                    let status = if stopping { "Отключение…" } else if ready { "Подключено" }
+                        else if matches!(&self.client.tunnel, Some(Connection::Vpn(vpn)) if vpn.is_configuring_adapter()) {
+                            "Настройка адаптера"
+                        } else if busy { "Подключение…" } else { "Не подключено" };
+
+                    if ui.add_enabled_ui(self.update.is_none(), |ui| compact_pill(ui, "Проверить обновления", 185.0, false)).inner.clicked() {
                         self.check_for_update(false);
                     }
-                },
-            );
 
-            if let Some(index) = selected {
-                let changing = self.client.profiles.selected != Some(index);
-                let result = self.client.select(Some(index));
-                if result.is_ok() && changing {
-                    self.routing = None;
-                    self.running_apps.close();
-                }
-                self.client.report(result, None);
-            }
-            if let Some(index) = editing {
-                let changing = self.client.profiles.selected != Some(index);
-                let result = self.client.select(Some(index));
-                if result.is_ok() {
-                    if changing {
-                        self.routing = None;
-                        self.running_apps.close();
+                    let last = self.last_profile_index();
+                    let show = self.client.active_profile.as_ref().map(|profile| (
+                        profile.name.clone(), profile.server.clone(), profile.mode, profile.socks_port, profile.ipv4_routing.clone(),
+                    )).or_else(|| last.map(|index| {
+                        let profile = &self.client.profiles.entries[index];
+                        (profile.name.clone(), profile.connection.server.clone(), profile.mode, profile.connection.socks_port, profile.ipv4_routing.clone())
+                    }));
+                    let dot = ui.add_enabled_ui(!busy, |ui| {
+                        let (rect, response, hover) = control(ui, vec2(36.0, 36.0), status);
+                        let tint = if ready { mint() } else if busy { muted() } else { error_color() };
+                        ui.painter().rect(rect, 9, mix(card(),hover_color(),hover), Stroke::new(1.0_f32,tint), StrokeKind::Inside);
+                        let wave = if self.animate_connection && (ready || busy) {
+                            ui.ctx().request_repaint_after(Duration::from_millis(30));
+                            let time = ui.input(|input| input.time) as f32;
+                            0.72 + 0.28 * (time * if busy { 7.0 } else { 2.7 }).cos()
+                        } else { 1.0 };
+                        ui.painter().circle_filled(rect.center(), 4.4, tint.gamma_multiply(wave));
+                        response
+                    }).inner.on_hover_ui(|ui| {
+                        ui.label(RichText::new(tr(status)).strong());
+                        if let Some((name, server, mode, port, routing)) = &show {
+                            ui.label(RichText::new(name).strong());
+                            let endpoint = if *mode == Mode::Socks5 { format!("127.0.0.1:{port}") } else { server.clone() };
+                            ui.label(RichText::new(format!("{endpoint} · {}", mode.label())).monospace().color(muted()));
+                            if *mode == Mode::SystemVpn {
+                                let route = if routing.by_application { "По приложениям" } else if routing.split { "Список CIDR" }
+                                    else if routing.exclude_ru { "IPv4 без IP из РФ" } else { "Весь IPv4-трафик" };
+                                ui.label(RichText::new(tr(route)).color(muted()));
+                            }
+                        }
+                    });
+                    if ready && show.as_ref().is_some_and(|(_,_,mode,_,_)| *mode == Mode::Socks5) {
+                        dot.context_menu(|ui| {
+                            if ui.button(tr("Копировать адрес прокси")).clicked() {
+                                if let Some(Connection::Socks(tunnel)) = &self.client.tunnel {
+                                    ui.ctx().copy_text(tunnel.endpoint().to_string());
+                                }
+                                ui.close_menu();
+                            }
+                        });
                     }
-                    self.profile_tab = ProfileTab::Connection;
-                }
-                self.client.report(result, None);
-            }
+                    if dot.clicked() {
+                        self.change_connection(last.or(self.client.profiles.selected));
+                    }
+                    ui.label(RichText::new(env!("CARGO_PKG_VERSION")).monospace().color(muted()));
+                });
+            });
         });
     }
 
-    fn dashboard(&mut self, ui: &mut Ui) {
+    fn profile_picker(&mut self, ui: &mut Ui) {
+        let selection = self.client.profiles.selected;
+        let label = selection.map_or(tr("Профили"), |index| {
+            self.client.profiles.entries[index].name.as_str()
+        });
+        let mut select = None;
+        let mut add = false;
+        let display = if label.chars().count() > 28 {
+            format!("{}…", label.chars().take(27).collect::<String>())
+        } else {
+            label.to_owned()
+        };
+        let response = egui::menu::menu_custom_button(
+            ui,
+            egui::Button::new("")
+                .min_size(vec2(214.0, 46.0))
+                .corner_radius(10)
+                .fill(rail())
+                .stroke(Stroke::new(1.0_f32, border())),
+            |ui| {
+                ui.set_width(252.0);
+                egui::ScrollArea::vertical()
+                    .max_height(270.0)
+                    .show(ui, |ui| {
+                        if self.client.profiles.entries.is_empty() {
+                            ui.label(tr("Нет сохранённых профилей"));
+                        }
+                        for (index, profile) in self.client.profiles.entries.iter().enumerate() {
+                            ui.push_id(index, |ui| {
+                                let (rect, response, hover) =
+                                    control(ui, vec2(248.0, 47.0), &profile.name);
+                                let selected = selection == Some(index);
+                                ui.painter().rect(
+                                    rect,
+                                    9,
+                                    mix(
+                                        if selected { row() } else { rail() },
+                                        hover_color(),
+                                        hover,
+                                    ),
+                                    Stroke::new(
+                                        1.0_f32,
+                                        if selected {
+                                            border()
+                                        } else {
+                                            Color32::TRANSPARENT
+                                        },
+                                    ),
+                                    StrokeKind::Inside,
+                                );
+                                let icon = Rect::from_min_size(
+                                    rect.min + vec2(7.0, 8.0),
+                                    vec2(31.0, 31.0),
+                                );
+                                ui.painter().rect_filled(
+                                    icon,
+                                    8,
+                                    if selected { accent() } else { row() },
+                                );
+                                self.assets.server.draw_tinted(
+                                    ui,
+                                    icon.min + vec2(5.5, 5.5),
+                                    if selected {
+                                        palette(0x1e320b, 0x243609)
+                                    } else {
+                                        muted()
+                                    },
+                                );
+                                let painter =
+                                    ui.painter().with_clip_rect(rect.shrink2(vec2(8.0, 0.0)));
+                                painter.text(
+                                    rect.min + vec2(47.0, 16.0),
+                                    Align2::LEFT_CENTER,
+                                    &profile.name,
+                                    FontId::proportional(13.0),
+                                    text_color(),
+                                );
+                                painter.text(
+                                    rect.min + vec2(47.0, 32.0),
+                                    Align2::LEFT_CENTER,
+                                    profile.mode.label(),
+                                    FontId::proportional(11.0),
+                                    muted(),
+                                );
+                                if self
+                                    .client
+                                    .active_profile
+                                    .as_ref()
+                                    .and_then(|profile| profile.index)
+                                    == Some(index)
+                                {
+                                    ui.painter().circle_filled(
+                                        rect.right_center() - vec2(10.0, 0.0),
+                                        3.0,
+                                        mint(),
+                                    );
+                                }
+                                if response.on_hover_text(&profile.name).clicked() {
+                                    select = Some(index);
+                                    ui.close_menu();
+                                }
+                            });
+                        }
+                    });
+                ui.add_space(5.0);
+                if ui
+                    .add_enabled_ui(
+                        self.client.directory.is_ok() && self.client.disconnecting.is_none(),
+                        |ui| compact_pill(ui, "Новый профиль", 248.0, false),
+                    )
+                    .inner
+                    .clicked()
+                {
+                    add = true;
+                    ui.close_menu();
+                }
+            },
+        )
+        .response
+        .on_hover_text(label);
+        let rect = response.rect;
+        let mark = Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(31.0, 31.0));
+        ui.painter().rect_filled(mark, 8, accent());
+        self.assets
+            .server
+            .draw_tinted(ui, mark.min + vec2(5.5, 5.5), palette(0x1e320b, 0x243609));
+        let clip = ui.painter().with_clip_rect(Rect::from_min_max(
+            rect.min + vec2(43.0, 0.0),
+            rect.max - vec2(23.0, 0.0),
+        ));
+        clip.text(
+            rect.min + vec2(44.0, 14.0),
+            Align2::LEFT_CENTER,
+            display,
+            FontId::proportional(17.0),
+            text_color(),
+        );
+        clip.text(
+            rect.min + vec2(44.0, 30.0),
+            Align2::LEFT_CENTER,
+            tr("Профили"),
+            FontId::proportional(11.0),
+            muted(),
+        );
+        let arrow = rect.right_center() - vec2(12.0, 0.0);
+        ui.painter().add(egui::Shape::line(
+            vec![
+                arrow + vec2(-4.0, -2.0),
+                arrow + vec2(0.0, 2.0),
+                arrow + vec2(4.0, -2.0),
+            ],
+            Stroke::new(1.35_f32, muted()),
+        ));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        if let Some(index) = select {
+            let result = self.client.select(Some(index));
+            if result.is_ok() {
+                if selection != Some(index) {
+                    self.routing = None;
+                    self.running_apps.close();
+                }
+            }
+            self.client.report(result, None);
+        }
+        if add {
+            self.new_profile();
+        }
+    }
+
+    fn dashboard(&mut self, ui: &mut Ui, viewport_bottom: f32) {
         use crate::invite_ui::Operation;
         let active = self.client.tunnel.is_some();
         let stopping = self.client.disconnecting.is_some();
         let can_change_mode = !active && !stopping;
         let selected = self.client.profiles.selected;
         let can_edit_selected = selected.is_some_and(|index| self.client.can_edit_profile(index));
-        let invited = selected.is_some_and(|index| {
-            self.client.profiles.entries[index].connection.is_invited()
-        });
+        let invited = selected
+            .is_some_and(|index| self.client.profiles.entries[index].connection.is_invited());
         if invited && self.profile_tab == ProfileTab::Users {
             self.profile_tab = ProfileTab::Connection;
         }
@@ -515,237 +869,166 @@ impl Desktop {
             );
             self.access.refresh();
         }
-        ui.horizontal(|ui| {
-            let width = ui.available_width();
-            let share_width = if self.access_owner.is_some() {
-                52.0
-            } else {
-                0.0
-            };
-            ui.allocate_ui_with_layout(
-                vec2((width - share_width).max(90.0), 58.0),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    ui.set_min_width((width - share_width).max(90.0));
-                    ui.label(RichText::new("Выбранный профиль").small().color(MUTED));
-                    let name = self.client.draft.name.trim();
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(if name.is_empty() { "SSH Tunnel" } else { name })
-                                .size(30.0)
-                                .strong(),
-                        )
-                        .truncate(),
-                    );
-                },
-            );
-            if self.access_owner.is_some()
-                && ui.add_enabled_ui(!stopping, share_icon).inner.clicked()
-            {
-                self.invitations.open(Operation::Share);
-            }
-        });
-        ui.add_space(16.0);
-        let ready = self
-            .client
-            .tunnel
-            .as_ref()
-            .is_some_and(Connection::is_ready);
-        let configuring_adapter = matches!(
-            self.client.tunnel.as_ref(),
-            Some(Connection::Vpn(vpn)) if vpn.is_configuring_adapter()
-        );
-        let (status, action) = if stopping {
-            ("Отключение…", "Подождите…")
-        } else if ready {
-            ("Подключено", "Отключить")
-        } else if configuring_adapter {
-            ("Настройка адаптера", "Отмена")
-        } else if active {
-            ("Подключение…", "Отмена")
-        } else {
-            ("Не подключено", "Подключить")
-        };
-        let running_profile = self.client.active_profile.as_ref();
-        let mut mode = running_profile.map_or(self.client.draft.mode, |profile| profile.mode);
-        let routing = running_profile.map_or(&self.client.draft.ipv4_routing, |profile| {
-            &profile.ipv4_routing
-        });
-        let route = if routing.by_application {
-            "Выбранные приложения"
-        } else if routing.split {
-            "Список CIDR"
-        } else if routing.exclude_ru {
-            "IPv4 без IP из РФ"
-        } else {
-            "Весь IPv4-трафик"
-        };
-        let socks_port = running_profile.map_or(self.client.draft.connection.socks_port, |profile| {
-            profile.socks_port
-        });
-        let connection_label = match running_profile {
-            Some(profile) if !profile.name.trim().is_empty() => {
-                format!("{} · {}", profile.name.trim(), profile.server.trim())
-            }
-            Some(profile) => profile.server.trim().to_owned(),
-            None => self.client.draft.connection.server.trim().to_owned(),
-        };
-        let proxy = match self.client.tunnel.as_ref() {
-            Some(Connection::Socks(tunnel)) if ready => tunnel.endpoint().to_string(),
-            _ => format!("127.0.0.1:{socks_port}"),
-        };
-        let mut connect = false;
-        let transition = if self.animate_connection {
-            ui.ctx()
-                .animate_bool_with_time(ui.id().with("tunnel-ready"), ready, 0.28)
-        } else if ready {
-            1.0
-        } else {
-            0.0
-        };
-        surface(
-            mix(
-                Color32::from_rgb(28, 32, 48),
-                Color32::from_rgb(25, 41, 35),
-                transition,
-            ),
-            22,
-            24,
-        )
-        .stroke(Stroke::new(
-            1.0_f32,
-            mix(BORDER, Color32::from_rgb(66, 100, 85), transition),
-        ))
-        .show(ui, |ui| {
-            let width = ui.available_width();
-            ui.set_min_width(width);
-            if mode == Mode::SystemVpn {
-                badge(ui, route, false);
-            } else if badge(ui, &format!("Локальный прокси · {proxy}"), false)
-                .on_hover_text("Копировать адрес прокси")
-                .clicked()
-            {
-                ui.ctx().copy_text(proxy.clone());
-                self.client.report(Ok(()), Some("Адрес прокси скопирован."));
-            }
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                tunnel_indicator(
-                    ui,
-                    ready,
-                    active && !ready || stopping,
-                    self.animate_connection,
-                    transition,
-                );
-                ui.add_space(7.0);
-                ui.vertical(|ui| {
-                    ui.add(egui::Label::new(RichText::new(status).size(30.0).strong()).truncate());
-                    if !connection_label.is_empty() {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(connection_label.as_str()).size(13.0).color(MUTED),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(connection_label.as_str());
-                    }
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), 46.0),
+            Layout::left_to_right(Align::Center).with_main_wrap(true),
+            |ui| {
+                self.profile_picker(ui);
+                let mut mode = self.client.draft.mode;
+                ui.allocate_ui_with_layout(vec2(258.0, 46.0), Layout::top_down(Align::Min), |ui| {
+                    ui.add_space(1.5);
+                    ui.add_enabled_ui(can_change_mode && selected.is_some(), |ui| {
+                        segments(ui, &mut mode)
+                    });
                 });
-            });
-            ui.add_space(11.0);
-            let (divider, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
-            ui.painter().rect_filled(divider, 0.0, BORDER);
-            ui.add_space(10.0);
-            let connection_button = |ui: &mut Ui| {
-                ui.add_enabled_ui(!stopping, |ui| pill(ui, action, 117.0, !active))
-                    .inner
-                    .clicked()
-            };
-            if width >= 426.0 {
-                let (row, _) = ui.allocate_exact_size(vec2(width, 48.0), Sense::hover());
-                let mut button_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(Rect::from_min_size(
-                            row.min + vec2(0.0, 4.0),
-                            vec2(117.0, 40.0),
-                        ))
-                        .layout(Layout::top_down(Align::Min)),
-                );
-                connect = connection_button(&mut button_ui);
-                let mut mode_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(Rect::from_min_size(
-                            row.right_top() - vec2(271.0, 0.0),
-                            vec2(271.0, 48.0),
-                        ))
-                        .layout(Layout::top_down(Align::Min)),
-                );
-                mode_ui.add_enabled_ui(can_change_mode, |ui| segments(ui, &mut mode));
-            } else {
-                connect = connection_button(ui);
-                ui.add_space(8.0);
-                ui.add_enabled_ui(can_change_mode, |ui| segments(ui, &mut mode));
-            }
-        });
-        if connect {
-            if selected.is_none() && !active {
-                self.client.editing = true;
-            } else if !active && mode == Mode::SystemVpn && !crate::elevation::is_admin() {
-                let result = self
-                    .client
-                    .ensure_saved()
-                    .and_then(|()| crate::elevation::request_connection());
-                if result.is_ok() {
-                    self.closing = true;
-                    ui.ctx().request_repaint();
+                if can_change_mode && selected.is_some() && mode != self.client.draft.mode {
+                    let result = self.client.set_mode(mode);
+                    self.client.report(result, None);
                 }
-                self.client.report(result, None);
-            } else {
-                let result = self.client.toggle_connection();
-                self.client.report(result, None);
-            }
-        }
-        if can_change_mode && mode != self.client.draft.mode {
-            let result = self.client.set_mode(mode);
-            self.client.report(result, None);
-        }
-        ui.add_space(16.0);
-        surface(CARD, 22, 20).show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                for (tab, label, width) in [
-                    (ProfileTab::Connection, "Подключение", 126.0),
-                    (ProfileTab::Users, "Пользователи", 126.0),
-                    (ProfileTab::Routing, "Маршрутизация", 143.0),
-                ] {
-                    if invited && tab == ProfileTab::Users {
-                        continue;
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let target_language = if self.appearance.english {
+                        "Переключить на русский"
+                    } else {
+                        "Switch to English"
+                    };
+                    let (rect, response) = toolbar_button(ui, target_language);
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        if self.appearance.english { "EN" } else { "RU" },
+                        FontId::monospace(12.0),
+                        text_color(),
+                    );
+                    if response.clicked() {
+                        self.appearance.english = !self.appearance.english;
+                        self.save_appearance();
+                        Self::apply_appearance(ui.ctx(), &self.appearance);
                     }
-                    if pill(ui, label, width, self.profile_tab == tab).clicked()
-                        && tab != self.profile_tab
-                    {
-                        self.profile_tab = tab;
-                        if tab == ProfileTab::Users {
-                            self.access.refresh_if_stale();
+                    let theme_label = if self.appearance.light {
+                        "Тёмная тема"
+                    } else {
+                        "Светлая тема"
+                    };
+                    let (rect, response) = toolbar_button(ui, theme_label);
+                    let center = rect.center();
+                    if self.appearance.light {
+                        ui.painter().add(egui::Shape::line(
+                            [
+                                (-3.0, -7.0),
+                                (-6.0, -3.0),
+                                (-6.0, 2.0),
+                                (-2.0, 6.0),
+                                (3.0, 7.0),
+                                (6.0, 4.0),
+                                (1.0, 3.0),
+                                (-2.0, -1.0),
+                                (-3.0, -7.0),
+                            ]
+                            .map(|(x, y)| center + vec2(x, y))
+                            .to_vec(),
+                            Stroke::new(1.35_f32, text_color()),
+                        ));
+                    } else {
+                        ui.painter().circle_stroke(
+                            center,
+                            3.6,
+                            Stroke::new(1.35_f32, text_color()),
+                        );
+                        for index in 0..8 {
+                            let angle = index as f32 * std::f32::consts::FRAC_PI_4;
+                            let direction = vec2(angle.cos(), angle.sin());
+                            ui.painter().line_segment(
+                                [center + direction * 5.8, center + direction * 8.0],
+                                Stroke::new(1.25_f32, text_color()),
+                            );
                         }
                     }
+                    if response.clicked() {
+                        self.appearance.light = !self.appearance.light;
+                        self.save_appearance();
+                        Self::apply_appearance(ui.ctx(), &self.appearance);
+                    }
+                    if self.access_owner.is_some()
+                        && ui.add_enabled_ui(!stopping, share_icon).inner.clicked()
+                    {
+                        self.invitations.open(Operation::Share);
+                    }
+                    if ui
+                        .add_enabled_ui(!stopping, |ui| tunnel_switch(ui, active))
+                        .inner
+                        .clicked()
+                    {
+                        self.change_connection(selected);
+                    }
+                });
+            },
+        );
+        ui.add_space(14.0);
+        let panel_height = (viewport_bottom - ui.cursor().top() - 52.0).max(0.0);
+        surface(card(), 16, 15).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(panel_height);
+            let mut tabs = vec![(ProfileTab::Connection, "Подключение", 126.0)];
+            if !invited {
+                tabs.push((ProfileTab::Users, "Пользователи", 132.0));
+            }
+            tabs.push((ProfileTab::Routing, "Маршрутизация", 143.0));
+            if let Some(tab) = selection_group(ui, "profile-tabs", self.profile_tab, &tabs) {
+                self.profile_tab = tab;
+                if tab == ProfileTab::Users {
+                    self.access.refresh_if_stale();
                 }
-            });
-            ui.add_space(16.0);
+            }
+            ui.add_space(4.0);
+            divider(ui);
+            ui.add_space(10.0);
             match self.profile_tab {
                 ProfileTab::Connection if selected.is_some() => {
-                    ui.add_enabled_ui(can_edit_selected, |ui| self.profile_fields(ui));
-                    if can_edit_selected
-                        && self.client.dirty()
-                        && pill(ui, "Отменить изменения", 173.0, false).clicked()
-                    {
-                        self.client.load_selection();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(tr("Параметры профиля")).strong());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let action = if invited {
+                                "Переименовать"
+                            } else {
+                                "Редактировать"
+                            };
+                            if ui
+                                .add_enabled_ui(can_edit_selected, |ui| {
+                                    compact_pill(ui, action, 150.0, false)
+                                })
+                                .inner
+                                .clicked()
+                            {
+                                self.client.editing = true;
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    if !invited {
+                        detail_row(
+                            ui,
+                            "Сервер SSH",
+                            &format!("{}:22", self.client.draft.connection.server),
+                        );
                     }
+                    detail_row(
+                        ui,
+                        "Способ входа",
+                        if invited {
+                            tr("По приглашению")
+                        } else {
+                            &self.client.draft.connection.user
+                        },
+                    );
                 }
                 ProfileTab::Users if self.access_owner.is_some() => {
                     let ctx = ui.ctx().clone();
                     ui.add_enabled_ui(!stopping, |ui| {
-                        self.access.show(&ctx, &mut self.client, Some(ui))
+                        self.access.show(&ctx, &mut self.client, Some(ui), None)
                     });
+                    if self.access.take_share_request() {
+                        self.invitations.open(Operation::Share);
+                    }
                 }
                 ProfileTab::Routing
                     if selected.is_some() && self.client.draft.mode == Mode::SystemVpn =>
@@ -753,13 +1036,15 @@ impl Desktop {
                     ui.add_enabled_ui(can_edit_selected, |ui| self.routing_panel(ui));
                 }
                 ProfileTab::Connection => {
-                    ui.label("Выберите профиль или создайте новый.");
+                    ui.label(tr("Выберите профиль или создайте новый."));
                 }
                 ProfileTab::Users => {
-                    ui.label("Управление приглашениями доступно в профиле владельца сервера.");
+                    ui.label(tr(
+                        "Управление приглашениями доступно в профиле владельца сервера.",
+                    ));
                 }
                 ProfileTab::Routing => {
-                    ui.label("Маршрутизация доступна в режиме System VPN (IPv4).");
+                    ui.label(tr("Маршрутизация доступна в режиме System VPN (IPv4)."));
                 }
             }
         });
@@ -817,11 +1102,11 @@ impl Desktop {
                 None => {
                     ui.ctx().request_repaint_after(Duration::from_millis(100));
                     let message = "Загрузка списка IPv4 РФ…";
-                    ui.label(RichText::new(message).color(MUTED).size(12.0));
+                    ui.label(RichText::new(tr(message)).color(muted()).size(12.0));
                     Err(message.to_owned())
                 }
                 Some(Err(error)) => {
-                    ui.label(RichText::new(error).color(ERROR).size(12.0));
+                    ui.label(RichText::new(error).color(error_color()).size(12.0));
                     if compact_pill(ui, "Повторить", 108.0, false).clicked() {
                         self.ru_ranges = None;
                         ui.ctx().request_repaint();
@@ -831,8 +1116,8 @@ impl Desktop {
                 Some(Ok(ranges)) => {
                     if ranges.from_ipdeny {
                         ui.label(
-                            RichText::new("Используется резервный список IPv4 от IPdeny.")
-                                .color(MUTED)
+                            RichText::new(tr("Используется резервный список IPv4 от IPdeny."))
+                                .color(muted())
                                 .size(12.0),
                         );
                     }
@@ -842,7 +1127,7 @@ impl Desktop {
                         .flatten()
                         .and_then(|routes| ranges.validate_included(&routes).err());
                     if let Some(message) = conflict {
-                        ui.label(RichText::new(&message).color(ERROR).size(12.0));
+                        ui.label(RichText::new(&message).color(error_color()).size(12.0));
                         Err(message)
                     } else {
                         Ok(())
@@ -884,103 +1169,52 @@ impl Desktop {
     fn manual_profile_fields(&mut self, ui: &mut Ui) {
         let profile = &mut self.client.draft;
         ui.columns(2, |cols| {
-            field(
-                &mut cols[0],
-                "Имя профиля",
-                &mut profile.name,
-                "Домашний сервер",
-                false,
-            );
+            field(&mut cols[0], "Имя профиля", &mut profile.name, "", false);
             field(
                 &mut cols[1],
                 "Адрес SSH",
                 &mut profile.connection.server,
-                "server.example.com",
+                "",
                 false,
             );
         });
-        ui.add_space(12.0);
+        ui.add_space(8.0);
+        let previous = profile.authentication;
         ui.columns(2, |cols| {
             field(
                 &mut cols[0],
                 "Имя пользователя",
                 &mut profile.connection.user,
-                "user",
+                "",
                 false,
             );
-            let (label, hint) = match profile.authentication {
-                Authentication::Password => ("Пароль SSH", "Введите пароль"),
-                Authentication::Key => ("Парольная фраза ключа", "Необязательно"),
-            };
-            field(&mut cols[1], label, &mut self.client.password, hint, true);
-        });
-        if profile.encrypted_secret.is_some() {
-            ui.add_space(10.0);
-            ui.with_layout(
-                Layout::left_to_right(Align::Center).with_main_wrap(true),
-                |ui| {
-                    ui.label(
-                        RichText::new("Пароль сохранён. Введите новый, чтобы заменить его.")
-                            .size(13.0)
-                            .color(MUTED),
-                    );
-                    if pill(ui, "Забыть пароль", 142.0, false).clicked() {
-                        profile.encrypted_secret = None;
-                        self.client.password.clear();
-                    }
-                },
-            );
-        }
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(10.0);
-        let previous = profile.authentication;
-        ui.with_layout(
-            Layout::left_to_right(Align::Center).with_main_wrap(true),
-            |ui| {
-                let (label, _) = ui.allocate_exact_size(vec2(102.0, 40.0), Sense::hover());
-                ui.painter().text(
-                    label.left_center(),
-                    Align2::LEFT_CENTER,
-                    "Способ входа",
-                    FontId::proportional(14.0),
-                    MUTED,
-                );
-                for (value, label) in [
-                    (Authentication::Password, "Пароль SSH"),
-                    (Authentication::Key, "SSH-ключ"),
-                ] {
-                    if pill(ui, label, 119.0, profile.authentication == value).clicked() {
-                        profile.authentication = value;
-                    }
+            let ui = &mut cols[1];
+            field_label(ui, "Способ входа");
+            surface(rail(), 9, 4).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                let width = ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(50.0);
+                let options = [
+                    (Authentication::Password, "Пароль SSH", width),
+                    (Authentication::Key, "SSH-ключ", width),
+                ];
+                if let Some(value) = selection_group(ui, "auth", profile.authentication, &options) {
+                    profile.authentication = value;
                 }
-            },
-        );
+            });
+        });
         if previous != profile.authentication {
             self.client.password.clear();
         }
         ui.add_space(8.0);
         if profile.authentication == Authentication::Key {
-            let width = ui.available_width();
-            ui.horizontal(|ui| {
+            field_label(ui, "Файл приватного ключа");
+            surface(rail(), 9, 6).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.allocate_ui_with_layout(
-                    vec2((width - 158.0).max(120.0), 64.0),
-                    Layout::top_down(Align::Min),
+                    vec2(ui.available_width(), 38.0),
+                    Layout::right_to_left(Align::Center),
                     |ui| {
-                        field(
-                            ui,
-                            "Файл приватного ключа",
-                            &mut profile.connection.key,
-                            "Укажите путь к ключу",
-                            false,
-                        );
-                    },
-                );
-                ui.allocate_ui_with_layout(
-                    vec2(148.0, 64.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        if pill(ui, "Выбрать файл", 148.0, false).clicked() {
+                        if form_action(ui, "Выбрать файл", 130.0, false).clicked() {
                             match select_file(
                                 "Выбрать приватный ключ SSH",
                                 "Все файлы (*.*)\0*.*\0\0",
@@ -996,8 +1230,40 @@ impl Desktop {
                                 Err(error) => self.client.notices.push((error, true)),
                             }
                         }
+                        let name = std::path::Path::new(&profile.connection.key)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(tr("Файл не выбран"));
+                        ui.add_sized(
+                            vec2(ui.available_width(), 38.0),
+                            egui::Label::new(RichText::new(name).color(muted()))
+                                .halign(Align::Min)
+                                .truncate(),
+                        )
+                        .on_hover_text(&profile.connection.key);
                     },
                 );
+            });
+            ui.add_space(8.0);
+        }
+        let label = if profile.authentication == Authentication::Key {
+            "Парольная фраза"
+        } else {
+            "Пароль SSH"
+        };
+        field(ui, label, &mut self.client.password, "", true);
+        if profile.encrypted_secret.is_some() {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(tr("Пароль сохранён. Введите новый, чтобы заменить его."))
+                        .size(12.0)
+                        .color(muted()),
+                );
+                if compact_pill(ui, "Забыть пароль", 142.0, false).clicked() {
+                    profile.encrypted_secret = None;
+                    self.client.password.clear();
+                }
             });
         }
         if profile.mode == Mode::Socks5 {
@@ -1022,40 +1288,32 @@ impl Desktop {
             );
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Способ входа").color(MUTED));
+                ui.label(RichText::new(tr("Способ входа")).color(muted()));
                 badge(ui, "По приглашению", false);
             });
         } else {
             self.manual_profile_fields(ui);
         }
-        ui.add_space(10.0);
-        let (actions, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-        if self.client.profiles.selected.is_some() {
-            let mut delete = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(Rect::from_min_size(
-                        actions.min + vec2(0.0, 2.0),
-                        vec2(164.0, 36.0),
-                    ))
-                    .layout(Layout::top_down(Align::Min)),
-            );
-            if danger_pill(&mut delete, "Удалить профиль").clicked() {
+    }
+
+    fn profile_footer(&mut self, ui: &mut Ui) -> bool {
+        ui.horizontal(|ui| {
+            if self.client.profiles.selected.is_some()
+                && danger_pill(ui, "Удалить профиль").clicked()
+            {
                 self.client.confirming_delete = true;
             }
-        }
-        let mut save = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(Rect::from_min_size(
-                    actions.right_top() - vec2(123.0, 0.0),
-                    vec2(123.0, 40.0),
-                ))
-                .layout(Layout::top_down(Align::Min)),
-        );
-        if pill(&mut save, "Сохранить", 123.0, true).clicked() {
-            if let Err(error) = self.save_profile() {
-                self.client.report(Err(error), None);
-            }
-        }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if form_action(ui, "Сохранить", 108.0, true).clicked() {
+                    if let Err(error) = self.save_profile() {
+                        self.client.report(Err(error), None);
+                    }
+                }
+                form_action(ui, "Отмена", 84.0, false).clicked()
+            })
+            .inner
+        })
+        .inner
     }
 
     fn save_profile(&mut self) -> Result<(), String> {
@@ -1106,31 +1364,73 @@ impl Desktop {
             .frame(dialog_frame())
             .show(ctx, |ui| {
                 ui.set_width(386.0);
-                ui.heading("Вышла новая версия приложения");
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(format!("Версия {}", version.trim_start_matches('v')))
-                        .color(MUTED),
-                );
+                ui.horizontal(|ui| {
+                    let (mark, _) = ui.allocate_exact_size(vec2(37.0, 37.0), Sense::hover());
+                    ui.painter().rect(
+                        mark,
+                        10,
+                        row(),
+                        Stroke::new(1.0_f32, border()),
+                        StrokeKind::Inside,
+                    );
+                    paint_action_icon(ui, mark.center(), "Обновить", mint());
+                    ui.heading(RichText::new(tr("Доступно обновление")).size(19.0).strong());
+                });
+                ui.add_space(10.0);
+                surface(rail(), 10, 11).show(ui, |ui| {
+                    egui::Grid::new("update-versions")
+                        .min_col_width(0.0)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            let width = ((ui.available_width() - 52.0) * 0.5).max(95.0);
+                            for label in ["Текущая версия", "", "Новая версия"]
+                            {
+                                if label.is_empty() {
+                                    ui.allocate_space(vec2(18.0, 1.0));
+                                } else {
+                                    ui.allocate_ui(vec2(width, 0.0), |ui| {
+                                        ui.label(
+                                            RichText::new(tr(label)).size(11.0).color(muted()),
+                                        );
+                                    });
+                                }
+                            }
+                            ui.end_row();
+                            ui.label(
+                                RichText::new(env!("CARGO_PKG_VERSION"))
+                                    .monospace()
+                                    .size(15.0),
+                            );
+                            ui.label(RichText::new("→").color(muted()));
+                            ui.label(
+                                RichText::new(version.trim_start_matches('v'))
+                                    .monospace()
+                                    .size(15.0)
+                                    .strong()
+                                    .color(mint()),
+                            );
+                            ui.end_row();
+                        });
+                });
                 ui.add_space(12.0);
                 if downloading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Скачиваю обновление…");
+                        ui.label(tr("Скачиваю обновление…"));
                     });
                     return (false, false);
                 }
                 if let Some(reason) = blocked {
-                    ui.label(RichText::new(reason).color(MUTED));
+                    ui.label(RichText::new(tr(reason)).color(muted()));
                     ui.add_space(8.0);
                 }
-                ui.horizontal(|ui| {
-                    let later = pill(ui, "Позже", 104.0, false).clicked();
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let install = ui
                         .add_enabled_ui(blocked.is_none(), |ui| {
                             pill(ui, "Обновить", 122.0, true).clicked()
                         })
                         .inner;
+                    let later = pill(ui, "Позже", 104.0, false).clicked();
                     (later, install)
                 })
                 .inner
@@ -1163,7 +1463,8 @@ impl Desktop {
                 match result {
                     Ok(Some(version)) => self.available_update = Some(version),
                     Ok(None) if !automatic => {
-                        self.client.report(Ok(()), Some("Установлена последняя версия."));
+                        self.client
+                            .report(Ok(()), Some("Установлена последняя версия."));
                     }
                     Err(error) if !automatic => self.client.report(Err(error), None),
                     _ => {}
@@ -1197,11 +1498,13 @@ impl Desktop {
             .frame(dialog_frame())
             .show(ctx, |ui| {
                 ui.set_width(386.0);
-                ui.heading("Удалить профиль");
+                ui.heading(tr("Удалить профиль"));
                 ui.add_space(6.0);
-                ui.label("Вы уверены, что хотите удалить профиль?");
+                ui.label(tr("Вы уверены, что хотите удалить профиль?"));
                 if let Some(index) = self.client.profiles.selected {
-                    ui.label(RichText::new(&self.client.profiles.entries[index].name).color(MUTED));
+                    ui.label(
+                        RichText::new(&self.client.profiles.entries[index].name).color(muted()),
+                    );
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -1240,26 +1543,27 @@ impl Desktop {
                 .unwrap_or_else(|_| Err("Настройка сервера прервана.".into()))
                 .and_then(|profile| self.client.save_prepared_profile(profile));
             let saved = result.is_ok();
-            self.client.report(result, Some("Сервер настроен. Профиль сохранён."));
+            self.client
+                .report(result, Some("Сервер настроен. Профиль сохранён."));
             if saved {
                 self.access.refresh();
                 return;
             }
         }
         let id = egui::Id::new("profile_editor");
-        let width = (ctx.screen_rect().width() - 70.0).clamp(300.0, 656.0);
+        let width = (ctx.screen_rect().width() - 70.0).clamp(300.0, 520.0);
         let modal = egui::Modal::new(id)
-            .frame(surface(Color32::from_rgb(36, 34, 57), 26, 30))
+            .frame(surface(card(), 18, 22))
             .backdrop_color(Color32::from_rgba_unmultiplied(13, 13, 23, 185));
         let result = modal.show(ctx, |ui| {
-            ui.set_width(width - 60.0);
+            ui.set_width(width - 44.0);
             if self.profile_setup.is_some() {
                 ctx.request_repaint_after(Duration::from_millis(120));
-                ui.heading("Настройка сервера");
+                ui.heading(tr("Настройка сервера"));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Подготавливаем VPN и приглашения по SSH…");
+                    ui.label(tr("Подготавливаем VPN и приглашения по SSH…"));
                 });
                 return false;
             }
@@ -1270,11 +1574,17 @@ impl Desktop {
                 } else {
                     "Новый профиль"
                 };
-                ui.label(RichText::new(title).size(27.0).strong());
+                ui.heading(RichText::new(tr(title)).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     close = ui
                         .add_enabled_ui(self.invitations.can_leave_import(), |ui| {
-                            icon_button(ui, &self.assets.close, "Закрыть").clicked()
+                            let (rect, response) = toolbar_button(ui, "Закрыть");
+                            self.assets.close.draw_tinted(
+                                ui,
+                                rect.center() - vec2(10.0, 10.0),
+                                text_color(),
+                            );
+                            response.clicked()
                         })
                         .inner;
                 });
@@ -1282,35 +1592,47 @@ impl Desktop {
             if self.client.profiles.selected.is_none() {
                 ui.add_space(10.0);
                 let importing = self.invitations.is_import_open();
-                surface(BACKGROUND, 22, 4).show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .add_enabled_ui(self.invitations.can_leave_import(), |ui| {
-                                pill(ui, "Подключение к серверу", 200.0, !importing).clicked()
-                            })
-                            .inner
-                        {
+                surface(rail(), 11, 4).show(ui, |ui| {
+                    let options = [
+                        (false, "Подключение к серверу", 178.0),
+                        (true, "По приглашению", 136.0),
+                    ];
+                    if let Some(selected) = ui
+                        .add_enabled_ui(self.invitations.can_leave_import(), |ui| {
+                            selection_group(ui, "profile-source", importing, &options)
+                        })
+                        .inner
+                    {
+                        if selected {
+                            self.invitations.open(crate::invite_ui::Operation::Import);
+                        } else {
                             self.invitations.close_import();
                         }
-                        if pill(ui, "По приглашению", 150.0, importing).clicked() && !importing
-                        {
-                            self.invitations.open(crate::invite_ui::Operation::Import);
-                        }
-                    });
+                    }
                 });
-                if self.invitations.is_import_open() {
-                    ui.add_space(14.0);
-                    self.invitations.show(ctx, &mut self.client, Some(ui));
-                    return close;
-                }
             }
-            ui.add_space(14.0);
-            egui::ScrollArea::vertical()
-                .max_height((ctx.screen_rect().height() - 180.0).max(230.0))
-                .show(ui, |ui| {
-                    self.profile_fields(ui);
-                });
-            close
+            let importing = self.invitations.is_import_open();
+            let creating = self.client.profiles.selected.is_none();
+            let body_height = (ctx.screen_rect().height() - 232.0).clamp(120.0, 294.0);
+            ui.add_space(10.0);
+            let scroll = &mut ui.spacing_mut().scroll;
+            scroll.floating = false;
+            scroll.bar_width = 5.0;
+            scroll.bar_inner_margin = 9.0;
+            scroll.bar_outer_margin = 3.0;
+            if importing {
+                self.invitations
+                    .show(ctx, &mut self.client, Some(ui), Some(body_height));
+                close
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt("profile-fields")
+                    .auto_shrink([false, !creating])
+                    .max_height(body_height)
+                    .show(ui, |ui| self.profile_fields(ui));
+                ui.add_space(10.0);
+                close | self.profile_footer(ui)
+            }
         });
         if self.profile_setup.is_none()
             && (result.inner || result.should_close())
@@ -1386,7 +1708,7 @@ impl Desktop {
         let mut top = screen.top() + 16.0;
         for toast in self.toasts.iter_mut().rev() {
             let offset = toast.offset(now, motion);
-            let color = if toast.error { ERROR } else { MINT };
+            let color = if toast.error { error_color() } else { mint() };
             let area = egui::Area::new(egui::Id::new(("action_notification", toast.id)))
                 .order(egui::Order::Foreground)
                 .fixed_pos(pos2(
@@ -1398,8 +1720,8 @@ impl Desktop {
                 .show(ctx, |ui| {
                     ui.set_clip_rect(screen);
                     ui.set_width(width);
-                    surface(CARD, 14, 12)
-                        .stroke(Stroke::new(1.0_f32, mix(BORDER, color, 0.38)))
+                    surface(card(), 14, 12)
+                        .stroke(Stroke::new(1.0_f32, mix(border(), color, 0.38)))
                         .show(ui, |ui| paint_toast_content(ui, toast, color))
                         .inner
                 });
@@ -1418,24 +1740,23 @@ impl Desktop {
 
     fn paint(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
-            .frame(rounded(BACKGROUND, 0, 16))
+            .frame(rounded(card(), 0, 0))
             .show(ctx, |ui| {
-                let height = ui.available_height();
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
-                        vec2(244.0, height),
-                        Layout::top_down(Align::Min),
-                        |ui| self.sidebar(ui, height),
-                    );
-                    ui.add_space(18.0);
-                    ui.allocate_ui_with_layout(
-                        vec2(ui.available_width() - 8.0, height),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| self.dashboard(ui));
-                        },
-                    );
-                });
+                ui.spacing_mut().item_spacing.y = 0.0;
+                self.appbar(ui);
+                divider(ui);
+                let viewport_bottom = ui.available_rect_before_wrap().bottom();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin::symmetric(24, 20))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 6.0;
+                                self.dashboard(ui, viewport_bottom);
+                            });
+                    });
             });
         if let Some(mut editor) = self.new_profile_editor.take() {
             std::mem::swap(&mut self.client, &mut editor);
@@ -1454,7 +1775,7 @@ impl Desktop {
         }
 
         if !self.invitations.is_import_open() {
-            self.invitations.show(ctx, &mut self.client, None);
+            self.invitations.show(ctx, &mut self.client, None, None);
         }
         if self.invitations.take_shared() {
             self.access.refresh();
@@ -1520,6 +1841,10 @@ impl eframe::App for Desktop {
                 self.client.disconnect();
             } else {
                 if !was_ready && tunnel.is_ready() {
+                    if let Some(profile) = &self.client.active_profile {
+                        self.appearance.last = Some((profile.name.clone(), profile.server.clone()));
+                        self.save_appearance();
+                    }
                     self.client.report(Ok(()), Some("Туннель подключён."));
                 }
                 ctx.request_repaint_after(Duration::from_millis(400));
@@ -1540,50 +1865,26 @@ fn rounded(fill: Color32, radius: u8, padding: i8) -> Frame {
 }
 
 pub(crate) fn surface(fill: Color32, radius: u8, padding: i8) -> Frame {
-    rounded(fill, radius, padding).stroke(Stroke::new(1.0_f32, BORDER))
+    rounded(fill, radius, padding).stroke(Stroke::new(1.0_f32, border()))
 }
 
 pub(crate) fn dialog_frame() -> Frame {
-    surface(Color32::from_rgb(30, 37, 50), 24, 23)
-        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(67, 78, 103)))
-}
-
-fn text(ui: &Ui, origin: egui::Pos2, value: &str, size: f32, color: Color32) {
-    ui.painter().text(
-        origin,
-        Align2::LEFT_TOP,
-        value,
-        FontId::proportional(size),
-        color,
-    );
-}
-
-// Painting inside an allocated slot leaves the parent layout's cursor alone.
-fn slot_text(ui: &Ui, bounds: Rect, value: RichText) {
-    let galley = egui::WidgetText::from(value).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Truncate),
-        bounds.width(),
-        egui::TextStyle::Body,
-    );
-    ui.painter()
-        .with_clip_rect(bounds.intersect(ui.clip_rect()))
-        .galley(bounds.min, galley, TEXT);
+    surface(card(), 17, 20)
 }
 
 pub(crate) fn badge(ui: &mut Ui, label: &str, active: bool) -> Response {
     ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .small()
-                .color(if active { MINT } else { LAVENDER }),
-        )
+        egui::Button::new(RichText::new(label).small().color(if active {
+            mint()
+        } else {
+            accent()
+        }))
         .corner_radius(18)
         .stroke(Stroke::NONE)
         .fill(if active {
             Color32::from_rgb(32, 59, 53)
         } else {
-            SOFT
+            soft()
         }),
     )
 }
@@ -1609,53 +1910,77 @@ fn windows_allows_motion() -> bool {
     }
 }
 
-fn tunnel_indicator(ui: &mut Ui, ready: bool, pending: bool, animate: bool, transition: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(54.0, 54.0), Sense::hover());
-    let center = rect.center();
-    let painter = ui.painter();
-    let tint = mix(LAVENDER, MINT, transition);
-    painter.circle_filled(center, 26.0, tint.gamma_multiply(0.10));
-    painter.circle_stroke(
-        center,
-        21.0,
-        Stroke::new(1.0_f32, tint.gamma_multiply(0.35)),
+fn toolbar_button(ui: &mut Ui, label: &str) -> (Rect, Response) {
+    let (rect, response, hover) = control(ui, vec2(36.0, 36.0), label);
+    ui.painter().rect(
+        rect,
+        9,
+        mix(rail(), hover_color(), hover),
+        Stroke::new(1.0_f32, border()),
+        StrokeKind::Inside,
     );
-    if pending {
-        let phase = if animate {
-            ui.ctx().request_repaint_after(Duration::from_millis(16));
-            ui.input(|input| input.time.rem_euclid(1.05) as f32 / 1.05)
-        } else {
-            0.08
-        };
-        let points = (0..=28)
-            .map(|step| {
-                let angle = (phase + step as f32 / 44.0) * std::f32::consts::TAU;
-                center + vec2(angle.cos(), angle.sin()) * 21.0
-            })
-            .collect();
-        painter.add(egui::Shape::line(points, Stroke::new(2.5_f32, tint)));
-    }
-    if ready {
-        let left = center + vec2(-8.0, 0.0);
-        let mid = center + vec2(-2.0, 6.0);
-        let right = center + vec2(9.0, -6.0);
-        let progress = 1.0 - (1.0 - transition).powi(3);
-        painter.line_segment(
-            [left, left.lerp(mid, (progress * 2.0).min(1.0))],
-            Stroke::new(2.5_f32, tint),
-        );
-        if progress > 0.5 {
-            painter.line_segment(
-                [mid, mid.lerp(right, progress * 2.0 - 1.0)],
-                Stroke::new(2.5_f32, tint),
-            );
-        }
-    } else {
-        painter.circle_filled(center, 3.5, tint);
-    }
+    (rect, response.on_hover_text(tr(label)))
 }
 
-fn control(ui: &mut Ui, size: egui::Vec2, label: &str) -> (Rect, Response, f32) {
+fn tunnel_switch(ui: &mut Ui, enabled: bool) -> Response {
+    let label = if enabled {
+        "Отключить"
+    } else {
+        "Подключить"
+    };
+    let (rect, response, hover) = control(ui, vec2(52.0, 38.0), label);
+    ui.painter().rect(
+        rect,
+        9,
+        mix(rail(), hover_color(), hover),
+        Stroke::new(1.0_f32, border()),
+        StrokeKind::Inside,
+    );
+    let track = Rect::from_center_size(rect.center(), vec2(33.0, 19.0));
+    ui.painter()
+        .rect_filled(track, 10, if enabled { accent() } else { hover_color() });
+    let position = if windows_allows_motion() {
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("switch"), enabled, 0.22)
+    } else if enabled {
+        1.0
+    } else {
+        0.0
+    };
+    let x = egui::lerp(track.left() + 9.0..=track.right() - 9.0, position);
+    ui.painter().circle_filled(
+        pos2(x, track.center().y),
+        6.5,
+        if enabled {
+            palette(0x1e320b, 0x243609)
+        } else {
+            muted()
+        },
+    );
+    response.on_hover_text(tr(label))
+}
+
+pub(crate) fn divider(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().rect_filled(rect, 0, border());
+}
+
+fn detail_row(ui: &mut Ui, label: &str, value: &str) {
+    surface(row(), 9, 9).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tr(label)).strong());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(value).monospace().color(muted())).truncate(),
+                );
+            });
+        });
+    });
+    ui.add_space(4.0);
+}
+
+pub(crate) fn control(ui: &mut Ui, size: egui::Vec2, label: &str) -> (Rect, Response, f32) {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
@@ -1670,11 +1995,11 @@ fn control(ui: &mut Ui, size: egui::Vec2, label: &str) -> (Rect, Response, f32) 
 }
 
 pub(crate) fn pill(ui: &mut Ui, label: &str, width: f32, filled: bool) -> Response {
-    draw_pill(ui, label, vec2(width, 40.0), filled, TEXT)
+    draw_pill(ui, label, vec2(width, 40.0), filled, text_color())
 }
 
 pub(crate) fn compact_pill(ui: &mut Ui, label: &str, width: f32, filled: bool) -> Response {
-    draw_pill(ui, label, vec2(width, 36.0), filled, TEXT)
+    draw_pill(ui, label, vec2(width, 36.0), filled, text_color())
 }
 
 pub(crate) fn danger_pill(ui: &mut Ui, label: &str) -> Response {
@@ -1690,7 +2015,7 @@ pub(crate) fn danger_pill(ui: &mut Ui, label: &str) -> Response {
             36.0,
         ),
         false,
-        ERROR,
+        error_color(),
     )
 }
 
@@ -1698,6 +2023,53 @@ type IconPaths = &'static [&'static [[f32; 2]]];
 
 fn action_icon(label: &str) -> IconPaths {
     match label {
+        "Новый профиль" => &[&[[8., 3.], [8., 13.]], &[[3., 8.], [13., 8.]]],
+        "Редактировать" | "Переименовать" => &[
+            &[
+                [3., 10.],
+                [3., 13.],
+                [6., 13.],
+                [13., 6.],
+                [10., 3.],
+                [3., 10.],
+            ],
+            &[[8., 5.], [11., 8.]],
+        ],
+        "Добавить" => &[
+            &[
+                [6., 7.],
+                [4., 6.],
+                [4., 4.],
+                [6., 3.],
+                [8., 4.],
+                [8., 6.],
+                [6., 7.],
+            ],
+            &[
+                [2., 13.],
+                [2., 11.],
+                [4., 9.],
+                [8., 9.],
+                [10., 11.],
+                [10., 13.],
+            ],
+            &[[10., 6.], [15., 6.]],
+            &[[12.5, 3.5], [12.5, 8.5]],
+        ],
+        "Щит минус" | "Щит плюс" => &[
+            &[
+                [8., 1.5],
+                [13.5, 4.],
+                [13.5, 8.],
+                [12., 11.5],
+                [8., 14.5],
+                [4., 11.5],
+                [2.5, 8.],
+                [2.5, 4.],
+                [8., 1.5],
+            ],
+            &[[5.5, 7.5], [10.5, 7.5]],
+        ],
         "Поделиться" => &[
             &[[2., 8.], [8., 8.], [8., 13.], [2., 13.], [2., 8.]],
             &[[8., 9.], [14., 3.]],
@@ -1810,8 +2182,14 @@ fn action_icon(label: &str) -> IconPaths {
     }
 }
 
-fn paint_action_icon(ui: &Ui, center: egui::Pos2, label: &str, color: Color32) {
+pub(crate) fn paint_action_icon(ui: &Ui, center: egui::Pos2, label: &str, color: Color32) {
     let origin = center - vec2(8.0, 8.0);
+    if label == "Щит плюс" {
+        ui.painter().line_segment(
+            [center - vec2(0.0, 2.5), center + vec2(0.0, 2.5)],
+            Stroke::new(1.4_f32, color),
+        );
+    }
     for path in action_icon(label) {
         ui.painter().add(egui::Shape::line(
             path.iter().map(|[x, y]| origin + vec2(*x, *y)).collect(),
@@ -1821,34 +2199,26 @@ fn paint_action_icon(ui: &Ui, center: egui::Pos2, label: &str, color: Color32) {
 }
 
 fn share_icon(ui: &mut Ui) -> Response {
-    let (rect, response, hover) = control(ui, vec2(42.0, 40.0), "Поделиться");
-    ui.painter().rect(
-        rect,
-        14.0,
-        mix(Color32::TRANSPARENT, HOVER, hover),
-        Stroke::new(1.0_f32, mix(BORDER, LAVENDER, hover)),
-        StrokeKind::Inside,
-    );
-    paint_action_icon(ui, rect.center(), "Поделиться", LAVENDER);
-    response.on_hover_text("Поделиться")
+    let (rect, response) = toolbar_button(ui, "Поделиться");
+    paint_action_icon(ui, rect.center(), "Поделиться", text_color());
+    response
 }
 
 fn draw_pill(ui: &mut Ui, label: &str, size: egui::Vec2, filled: bool, color: Color32) -> Response {
     let (rect, response, hover) = control(ui, size, label);
     let fill = if filled {
-        mix(PRIMARY, Color32::from_rgb(227, 215, 255), hover)
+        mix(accent(), palette(0xdcf6a9, 0xdcf6a9), hover)
     } else {
-        mix(Color32::TRANSPARENT, HOVER, hover)
+        mix(Color32::TRANSPARENT, hover_color(), hover)
     };
     let border = if filled {
         Stroke::NONE
     } else {
-        Stroke::new(1.0_f32, mix(BORDER, LAVENDER, hover))
+        Stroke::new(1.0_f32, mix(border(), accent(), hover))
     };
-    ui.painter()
-        .rect(rect, size.y / 2.0, fill, border, StrokeKind::Inside);
+    ui.painter().rect(rect, 9, fill, border, StrokeKind::Inside);
     let color = if filled {
-        Color32::from_rgb(41, 22, 82)
+        palette(0x1e320b, 0x243609)
     } else {
         color
     };
@@ -1857,37 +2227,48 @@ fn draw_pill(ui: &mut Ui, label: &str, size: egui::Vec2, filled: bool, color: Co
 }
 
 fn paint_action_content(ui: &Ui, rect: Rect, label: &str, color: Color32) {
+    paint_selection_label(ui, rect, label, color, 0.0, 13.0);
+}
+
+fn paint_selection_label(
+    ui: &Ui,
+    rect: Rect,
+    label: &str,
+    color: Color32,
+    emphasis: f32,
+    size: f32,
+) {
     if label == "×" {
         paint_action_icon(ui, rect.center(), label, color);
     } else {
         let mut galley =
             ui.painter()
-                .layout_no_wrap(label.to_owned(), FontId::proportional(13.0), color);
+                .layout_no_wrap(tr(label).to_owned(), FontId::proportional(size), color);
         let label_width = rect.width() - 32.0;
         if galley.size().x > label_width {
-            let font_size = (13.0 * label_width / galley.size().x).max(11.0);
+            let font_size = (size * label_width / galley.size().x).max(11.0);
             galley = ui.painter().layout_no_wrap(
-                label.to_owned(),
+                tr(label).to_owned(),
                 FontId::proportional(font_size),
                 color,
             );
         }
         let left = (rect.center().x - (galley.size().x + 22.0) * 0.5).max(rect.left() + 6.0);
         paint_action_icon(ui, pos2(left + 8.0, rect.center().y), label, color);
-        ui.painter().with_clip_rect(rect.shrink(4.0)).galley(
-            pos2(left + 22.0, rect.center().y - galley.size().y * 0.5),
-            galley,
-            color,
-        );
+        let painter = ui.painter().with_clip_rect(rect.shrink(4.0));
+        let origin = pos2(left + 22.0, rect.center().y - galley.size().y * 0.5);
+        // Fade in a sub-pixel second pass to increase weight without moving the glyphs.
+        if emphasis > 0.0 {
+            let tint = color.gamma_multiply(0.38 * emphasis);
+            let thick = painter.layout_no_wrap(
+                tr(label).into(),
+                galley.job.sections[0].format.font_id.clone(),
+                tint,
+            );
+            painter.galley(origin + vec2(0.4, 0.0), thick, tint);
+        }
+        painter.galley(origin, galley, color);
     }
-}
-
-fn icon_button(ui: &mut Ui, icon: &Artwork, label: &str) -> Response {
-    let (rect, response, hover) = control(ui, vec2(40.0, 40.0), label);
-    ui.painter()
-        .circle_filled(rect.center(), 20.0, mix(Color32::TRANSPARENT, HOVER, hover));
-    icon.draw(ui, rect.center() - icon.size * 0.5 - vec2(0.0, 2.0 * hover));
-    response.on_hover_text(label)
 }
 
 pub(crate) fn refresh_icon(ui: &mut Ui) -> Response {
@@ -1895,45 +2276,193 @@ pub(crate) fn refresh_icon(ui: &mut Ui) -> Response {
     ui.painter().rect(
         rect,
         9.0,
-        mix(BACKGROUND, HOVER, hover),
-        Stroke::new(1.0_f32, mix(BORDER, LAVENDER, hover)),
+        mix(background(), hover_color(), hover),
+        Stroke::new(1.0_f32, mix(border(), accent(), hover)),
         StrokeKind::Inside,
     );
-    paint_action_icon(ui, rect.center(), "Обновить список", TEXT);
+    paint_action_icon(ui, rect.center(), "Обновить список", text_color());
     response.on_hover_text("Обновить список")
 }
 
-fn segments(ui: &mut Ui, mode: &mut Mode) {
-    surface(BACKGROUND, 24, 3).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.x = 1.0;
-        ui.horizontal(|ui| {
-            for (value, width) in [(Mode::SystemVpn, 158.0), (Mode::Socks5, 104.0)] {
-                let label = value.label();
-                let (rect, response, hover) = control(ui, vec2(width, 40.0), label);
-                let selected = *mode == value;
-                ui.painter().rect_filled(
-                    rect,
-                    20.0,
-                    if selected {
-                        HOVER
-                    } else {
-                        mix(BACKGROUND, SOFT, hover)
-                    },
-                );
-                paint_action_content(ui, rect, label, if selected { LAVENDER } else { MUTED });
-                if response.clicked() {
-                    *mode = value;
-                }
+#[derive(Clone)]
+struct SelectionMotion {
+    from: Rect,
+    to: Rect,
+    from_weights: Vec<f32>,
+    selected: usize,
+    started: f64,
+}
+
+const SELECTION_SECONDS: f64 = 0.52;
+
+fn selection_progress(elapsed: f64) -> f32 {
+    // Match the HTML's cubic-bezier(.4, 0, .2, 1).
+    let x = (elapsed / SELECTION_SECONDS).clamp(0.0, 1.0) as f32;
+    if x == 0.0 || x == 1.0 {
+        return x;
+    }
+    let (mut low, mut high) = (0.0, 1.0);
+    for _ in 0..12 {
+        let t = (low + high) * 0.5;
+        let u = 1.0 - t;
+        let curve = 1.2 * u * u * t + 0.6 * u * t * t + t * t * t;
+        if curve < x {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    let t = (low + high) * 0.5;
+    t * t * (3.0 - 2.0 * t)
+}
+
+impl SelectionMotion {
+    fn at(&self, time: f64) -> (Rect, Vec<f32>) {
+        let progress = selection_progress(time - self.started);
+        let point = |a: egui::Pos2, b: egui::Pos2| a + (b - a) * progress;
+        let rect = Rect::from_min_max(
+            point(self.from.min, self.to.min),
+            point(self.from.max, self.to.max),
+        );
+        let weights = self
+            .from_weights
+            .iter()
+            .enumerate()
+            .map(|(index, &from)| egui::lerp(from..=f32::from(index == self.selected), progress))
+            .collect();
+        (rect, weights)
+    }
+}
+
+fn selection_group<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    id: &str,
+    current: T,
+    options: &[(T, &str, f32)],
+) -> Option<T> {
+    let plain = matches!(id, "auth" | "profile-source");
+    let size = if id == "profile-tabs" { 13.0 } else { 12.0 };
+    let id = ui.id().with(id);
+    let mut value = None;
+    ui.horizontal_wrapped(|ui| {
+        let mut controls = Vec::with_capacity(options.len());
+        for &(option, label, width) in options {
+            let (rect, response, hover) = control(ui, vec2(width, 35.0), label);
+            if response.clicked() && current != option {
+                value = Some(option);
             }
-        });
+            controls.push((rect, label, hover));
+        }
+        let selected = options
+            .iter()
+            .position(|(option, _, _)| *option == value.unwrap_or(current));
+        let weights = |selected| {
+            controls
+                .iter()
+                .enumerate()
+                .map(|(i, _)| f32::from(Some(i) == selected))
+                .collect::<Vec<_>>()
+        };
+        let (highlight, emphasis) = if let Some(selected) = selected {
+            let target = controls[selected].0;
+            if windows_allows_motion() {
+                let time = ui.input(|input| input.time);
+                let previous = ui.ctx().data(|data| data.get_temp::<SelectionMotion>(id));
+                let mut motion = previous
+                    .filter(|old| old.from_weights.len() == controls.len())
+                    .unwrap_or_else(|| SelectionMotion {
+                        from: target,
+                        to: target,
+                        from_weights: weights(Some(selected)),
+                        selected,
+                        started: time - SELECTION_SECONDS,
+                    });
+                if motion.selected != selected {
+                    let (from, from_weights) = motion.at(time);
+                    motion = SelectionMotion {
+                        from,
+                        to: target,
+                        from_weights,
+                        selected,
+                        started: time,
+                    };
+                } else if motion.to != target {
+                    // Layout alone (resize or language change) must not trigger a selection animation.
+                    motion = SelectionMotion {
+                        from: target,
+                        to: target,
+                        from_weights: weights(Some(selected)),
+                        selected,
+                        started: time - SELECTION_SECONDS,
+                    };
+                }
+                let frame = if time - motion.started < SELECTION_SECONDS {
+                    ui.ctx().request_repaint_after(Duration::from_millis(16));
+                    motion.at(time)
+                } else {
+                    (target, weights(Some(selected)))
+                };
+                ui.ctx().data_mut(|data| data.insert_temp(id, motion));
+                (Some(frame.0), frame.1)
+            } else {
+                (Some(target), weights(Some(selected)))
+            }
+        } else {
+            (None, weights(None))
+        };
+        if let Some(rect) = highlight {
+            ui.painter().rect(
+                rect,
+                8,
+                hover_color(),
+                Stroke::new(1.0_f32, border()),
+                StrokeKind::Inside,
+            );
+        }
+        for ((rect, label, hover), emphasis) in controls.into_iter().zip(emphasis) {
+            let color = mix(muted(), text_color(), emphasis.max(hover * 0.5));
+            if plain {
+                let font = FontId::proportional(size);
+                if emphasis > 0.0 {
+                    ui.painter().text(
+                        rect.center() + vec2(0.35, 0.0),
+                        Align2::CENTER_CENTER,
+                        tr(label),
+                        font.clone(),
+                        color.gamma_multiply(emphasis * 0.40),
+                    );
+                }
+                ui.painter()
+                    .text(rect.center(), Align2::CENTER_CENTER, tr(label), font, color);
+            } else {
+                paint_selection_label(ui, rect, label, color, emphasis, size);
+            }
+        }
+    });
+    value
+}
+
+fn segments(ui: &mut Ui, mode: &mut Mode) {
+    surface(rail(), 11, 3).show(ui, |ui| {
+        if let Some(value) = selection_group(
+            ui,
+            "tunnel-mode",
+            *mode,
+            &[
+                (Mode::SystemVpn, Mode::SystemVpn.label(), 150.0),
+                (Mode::Socks5, Mode::Socks5.label(), 91.0),
+            ],
+        ) {
+            *mode = value;
+        }
     });
 }
 
 fn ru_exclusion_control(ui: &mut Ui, routing: &mut crate::profiles::Ipv4Routing) -> bool {
     let before = routing.exclude_ru;
-    surface(BACKGROUND, 12, 12).show(ui, |ui| {
+    surface(background(), 12, 12).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Исключение РФ Зоны").strong());
+            ui.label(RichText::new(tr("Исключение РФ Зоны")).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_enabled_ui(!routing.by_application, |ui| {
                     let (rect, response) = ui.allocate_exact_size(vec2(38.0, 22.0), Sense::click());
@@ -1950,17 +2479,17 @@ fn ru_exclusion_control(ui: &mut Ui, routing: &mut crate::profiles::Ipv4Routing)
                         )
                     });
                     let active = routing.exclude_ru;
-                    let track = if active { LAVENDER } else { ROW };
-                    let knob = if active { BACKGROUND } else { MUTED };
+                    let track = if active { accent() } else { row() };
+                    let knob = if active { background() } else { muted() };
                     let x = if active {
                         rect.right() - 11.0
                     } else {
                         rect.left() + 11.0
                     };
                     let outline = if response.has_focus() || response.hovered() {
-                        LAVENDER
+                        accent()
                     } else {
-                        BORDER
+                        border()
                     };
                     ui.painter().rect_filled(rect, 11.0, track);
                     ui.painter().rect_stroke(
@@ -1977,7 +2506,7 @@ fn ru_exclusion_control(ui: &mut Ui, routing: &mut crate::profiles::Ipv4Routing)
             "Доступно в режимах «Весь IPv4-трафик» и «Список CIDR»."
         } else {
             "IP из списка РФ идут напрямую. Большой список маршрутов может влиять на производительность и увеличить время подключения."
-        }).color(MUTED).size(12.0));
+        }).color(muted()).size(12.0));
     });
     before != routing.exclude_ru
 }
@@ -1992,32 +2521,28 @@ fn routing_fields(
         picker.show(ui, &mut routing.applications, notices);
         return;
     }
-    surface(BACKGROUND, 22, 4).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            for (label, width, split, apps) in [
-                ("Весь IPv4-трафик", 142.0, false, false),
-                ("Список CIDR", 113.0, true, false),
-                ("По приложениям", 141.0, false, true),
-            ] {
-                if pill(
-                    ui,
-                    label,
-                    width,
-                    routing.split == split && routing.by_application == apps,
-                )
-                .clicked()
-                {
-                    routing.split = split;
-                    routing.by_application = apps;
-                }
-            }
-        });
+    surface(rail(), 11, 4).show(ui, |ui| {
+        if let Some((split, apps)) = selection_group(
+            ui,
+            "routing",
+            (routing.split, routing.by_application),
+            &[
+                ((false, false), "Весь IPv4-трафик", 144.0),
+                ((true, false), "Список CIDR", 114.0),
+                ((false, true), "По приложениям", 140.0),
+            ],
+        ) {
+            routing.split = split;
+            routing.by_application = apps;
+        }
     });
     ui.add_space(12.0);
     if routing.by_application {
         ui.label(
-            RichText::new("Через туннель пойдёт TCP-трафик выбранных программ. UDP блокируется.")
-                .color(MUTED),
+            RichText::new(tr(
+                "Через туннель пойдёт TCP-трафик выбранных программ. UDP блокируется.",
+            ))
+            .color(muted()),
         );
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
@@ -2036,10 +2561,10 @@ fn routing_fields(
         });
         ui.add_space(8.0);
         let mut remove = None;
-        surface(BACKGROUND, 12, 10).show(ui, |ui| {
+        surface(background(), 12, 10).show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             if routing.applications.is_empty() {
-                ui.label(RichText::new("Приложения пока не выбраны").color(MUTED));
+                ui.label(RichText::new(tr("Приложения пока не выбраны")).color(muted()));
             }
             egui::ScrollArea::vertical()
                 .id_salt("tunnel-apps")
@@ -2079,9 +2604,9 @@ fn routing_fields(
                 .desired_width(f32::INFINITY),
         );
         ui.label(
-            RichText::new("Через VPN идут только указанные диапазоны IPv4.")
+            RichText::new(tr("Через VPN идут только указанные диапазоны IPv4."))
                 .size(12.0)
-                .color(MUTED),
+                .color(muted()),
         );
     } else {
         let description = if routing.exclude_ru {
@@ -2089,7 +2614,7 @@ fn routing_fields(
         } else {
             "Через VPN пойдёт весь IPv4-трафик устройства."
         };
-        ui.label(RichText::new(description).color(MUTED));
+        ui.label(RichText::new(tr(description)).color(muted()));
     }
 }
 
@@ -2099,18 +2624,64 @@ pub(crate) fn field(ui: &mut Ui, label: &str, value: &mut String, hint: &str, se
         label,
         egui::TextEdit::singleline(value)
             .password(secret)
-            .hint_text(hint)
-            .font(FontId::proportional(15.0)),
+            .hint_text(tr(hint))
+            .min_size(vec2(0.0, 20.0))
+            .font(FontId::proportional(12.0)),
     );
 }
 
+fn field_label(ui: &mut Ui, label: &str) {
+    ui.label(RichText::new(tr(label)).size(12.0).strong());
+}
+
+pub(crate) fn form_action(ui: &mut Ui, label: &str, width: f32, primary: bool) -> Response {
+    let (rect, response, hover) = control(ui, vec2(width, 38.0), label);
+    let fill = if primary {
+        mix(accent(), palette(0xdcf6a9, 0xdcf6a9), hover)
+    } else {
+        mix(card(), hover_color(), hover)
+    };
+    ui.painter().rect(
+        rect,
+        9,
+        fill,
+        Stroke::new(
+            1.0_f32,
+            if primary {
+                Color32::TRANSPARENT
+            } else {
+                border()
+            },
+        ),
+        StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        tr(label),
+        FontId::proportional(14.0),
+        if primary {
+            palette(0x1e320b, 0x243609)
+        } else {
+            text_color()
+        },
+    );
+    response
+}
+
 pub(crate) fn form_field(ui: &mut Ui, label: &str, edit: egui::TextEdit<'_>) {
-    rounded(Color32::from_rgb(27, 25, 45), 13, 12)
-        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(99, 87, 126)))
+    field_label(ui, label);
+    let id = ui.next_auto_id();
+    let focused = ui.ctx().memory(|memory| memory.has_focus(id));
+    let response = rounded(if focused { hover_color() } else { rail() }, 9, 9)
+        .stroke(Stroke::new(1.0_f32, border()))
         .show(ui, |ui| {
-            ui.label(RichText::new(label).size(11.0).color(LAVENDER));
-            ui.add(edit.frame(false).desired_width(f32::INFINITY));
-        });
+            ui.add(edit.id(id).frame(false).desired_width(f32::INFINITY))
+        })
+        .inner;
+    if response.has_focus() != focused {
+        ui.ctx().request_repaint();
+    }
 }
 
 #[cfg(test)]
@@ -2151,6 +2722,7 @@ mod tests {
     fn update_dialog_shows_the_version_and_later_does_not_download() {
         let ctx = egui::Context::default();
         let client = Client {
+            adapters: Default::default(),
             directory: Ok(std::path::PathBuf::new()),
             profiles: crate::Profiles::default(),
             draft: crate::SavedProfile::default(),
@@ -2181,7 +2753,7 @@ mod tests {
                 _ => None,
             })
         };
-        assert!(position("Версия 0.4.17").is_some());
+        assert!(position("0.4.17").is_some());
         assert!(position("Обновить").is_some());
         let pos = position("Позже").unwrap();
         for pressed in [true, false] {
@@ -2203,7 +2775,7 @@ mod tests {
     }
 
     #[test]
-    fn browsing_during_disconnect_keeps_the_active_profile_on_the_status_card() {
+    fn browsing_another_profile_keeps_the_last_quick_connection_target() {
         let ctx = egui::Context::default();
         let temp = tempfile::tempdir().unwrap();
         let home = crate::SavedProfile {
@@ -2221,6 +2793,7 @@ mod tests {
             ..Default::default()
         };
         let client = Client {
+            adapters: Default::default(),
             directory: Ok(temp.path().to_owned()),
             profiles: crate::Profiles {
                 entries: vec![home.clone(), office.clone()],
@@ -2238,52 +2811,19 @@ mod tests {
             keep_selection_on_insert: None,
         };
         let mut desktop = Desktop::new(&ctx, client).unwrap();
-        let input = |events| egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 660.0))),
-            events,
-            ..Default::default()
-        };
-        let frame = ctx.run(input(vec![]), |ctx| desktop.paint(ctx));
-        let office_row = frame
-            .shapes
-            .iter()
-            .filter_map(|shape| match &shape.shape {
-                egui::Shape::Rect(shape) if shape.rect.size() == vec2(208.0, 60.0) => {
-                    Some(shape.rect)
-                }
-                _ => None,
-            })
-            .max_by(|a, b| a.min.y.total_cmp(&b.min.y))
-            .unwrap();
-        let pos = office_row.center();
-        for pressed in [true, false] {
-            let _ = ctx.run(
-                input(vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ]),
-                |ctx| desktop.paint(ctx),
-            );
-        }
+        desktop.appearance.last = Some(("Дом".into(), "home.example".into()));
+        desktop.client.select(Some(1)).unwrap();
         assert_eq!(desktop.client.profiles.selected, Some(1));
         assert!(desktop.client.draft == office);
-        let frame = ctx.run(input(vec![]), |ctx| desktop.paint(ctx));
-        assert!(frame.shapes.iter().any(|shape| matches!(
-            &shape.shape,
-            egui::Shape::Text(text) if text.galley.job.text == "Дом · home.example"
-        )));
+        assert_eq!(desktop.last_profile_index(), Some(0));
+        assert_eq!(desktop.client.active_profile.as_ref().unwrap().name, "Дом");
     }
 
     #[test]
     fn figma_assets_load_at_their_native_layout_sizes() {
         let ctx = egui::Context::default();
         let assets = Assets::load(&ctx).unwrap();
-        assert_eq!(assets.mark.size, vec2(22.0, 22.0));
+        assert_eq!(assets.mark.size, vec2(32.0, 32.0));
         for icon in [&assets.server, &assets.close] {
             assert_eq!(icon.size, vec2(20.0, 20.0));
         }
@@ -2305,6 +2845,7 @@ mod tests {
             ..Default::default()
         };
         let client = Client {
+            adapters: Default::default(),
             directory: Ok(std::path::PathBuf::new()),
             profiles: crate::Profiles {
                 entries: vec![profile.clone()],
@@ -2336,10 +2877,21 @@ mod tests {
             })
         };
         assert!(desktop.profile_tab == ProfileTab::Connection);
-        for label in ["Имя профиля", "Способ входа", "По приглашению", "Маршрутизация"] {
+        for label in [
+            "Параметры профиля",
+            "Способ входа",
+            "По приглашению",
+            "Маршрутизация",
+        ] {
             assert!(has_label(label), "Missing {label}");
         }
-        for label in ["Пользователи", "Адрес SSH", "Имя пользователя", "Файл приватного ключа", "Локальный порт SOCKS5"] {
+        for label in [
+            "Пользователи",
+            "Адрес SSH",
+            "Имя пользователя",
+            "Файл приватного ключа",
+            "Локальный порт SOCKS5",
+        ] {
             assert!(!has_label(label), "Unexpected {label}");
         }
     }
@@ -2356,6 +2908,7 @@ mod tests {
             ..Default::default()
         };
         let client = Client {
+            adapters: Default::default(),
             directory: Ok(std::path::PathBuf::new()),
             profiles: crate::Profiles {
                 entries: vec![profile.clone()],
@@ -2378,56 +2931,19 @@ mod tests {
             ..Default::default()
         };
         let desktop_frame = ctx.run(input(), |ctx| desktop.paint(ctx));
-        let check_controls = |frame: &egui::FullOutput, stacked: bool| {
-            let find = |fill, width: f32| {
-                frame
+        for label in ["Домашний сервер", "System VPN (IPv4)", "Маршрутизация"]
+        {
+            assert!(
+                desktop_frame
                     .shapes
                     .iter()
-                    .find_map(|shape| match &shape.shape {
-                        egui::Shape::Rect(shape)
-                            if shape.fill == fill
-                                && (width == 0.0 || (shape.rect.width() - width).abs() <= 4.0) =>
-                        {
-                            Some(shape.rect)
-                        }
-                        _ => None,
-                    })
-                    .expect("expected painted dashboard control")
-            };
-            let badge = find(SOFT, 0.0);
-            let connect = find(PRIMARY, 117.0);
-            let modes = find(BACKGROUND, 271.0);
-            assert!(connect.top() > badge.bottom(), "{badge:?} vs {connect:?}");
-            assert!(!connect.intersects(modes), "{connect:?} vs {modes:?}");
-            if stacked {
-                assert!(connect.bottom() < modes.top());
-            } else {
-                assert!(
-                    (connect.center().y - modes.center().y).abs() <= 5.0,
-                    "{connect:?} vs {modes:?}"
-                );
-                assert!(connect.right() + 25.0 < modes.left());
-            }
-        };
-        check_controls(&desktop_frame, false);
-        let reported_size = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(966.0, 623.0))),
-                ..Default::default()
-            },
-            |ctx| desktop.paint(ctx),
-        );
-        check_controls(&reported_size, false);
-        let narrow = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 520.0))),
-                ..Default::default()
-            },
-            |ctx| desktop.paint(ctx),
-        );
-        check_controls(&narrow, true);
+                    .any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.job.text.contains(label))),
+                "Missing {label}"
+            );
+        }
         let meshes = ctx.tessellate(desktop_frame.shapes, desktop_frame.pixels_per_point);
-        for image in [&desktop.assets.mark, &desktop.assets.server] {
+        for image in [&desktop.assets.mark] {
             assert!(
                 meshes.iter().any(|item| matches!(&item.primitive,
                 egui::epaint::Primitive::Mesh(mesh) if mesh.texture_id == image.texture.id())),

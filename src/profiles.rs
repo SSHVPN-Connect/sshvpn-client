@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_id: Option<u128>,
     pub name: String,
     pub connection: Profile,
     pub mode: Mode,
@@ -149,6 +151,7 @@ pub enum Authentication {
 impl Default for SavedProfile {
     fn default() -> Self {
         Self {
+            adapter_id: None,
             name: String::new(),
             connection: Profile::default(),
             mode: Mode::SystemVpn,
@@ -196,6 +199,7 @@ impl Profiles {
                 let migrated = Self {
                     selected: Some(0),
                     entries: vec![SavedProfile {
+                        adapter_id: None,
                         name: if connection.server.trim().is_empty() {
                             "Imported profile".into()
                         } else {
@@ -265,6 +269,7 @@ mod tests {
 
         profiles.entries.push(SavedProfile {
             name: "Office".into(),
+            adapter_id: Some(0xa7c5dd7f_ab75_47d7_82ee_271b33b10382),
             mode: Mode::Socks5,
             ..SavedProfile::default()
         });

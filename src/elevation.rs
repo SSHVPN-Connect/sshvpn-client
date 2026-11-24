@@ -25,14 +25,6 @@ pub fn profile_scope() -> std::io::Result<u64> {
     Ok(hash.finish())
 }
 
-pub fn request_connection() -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("Не удалось найти исполняемый файл: {error}"))?;
-    let scope = profile_scope().map_err(|error| error.to_string())?;
-    run_as_admin(&executable, &format!("--connect-elevated {scope}"))
-        .map_err(|error| format!("Не удалось запустить System VPN с правами администратора: {error}"))
-}
-
 pub fn run_as_admin(executable: &std::path::Path, arguments: &str) -> std::io::Result<()> {
     let executable: Vec<u16> = executable
         .as_os_str()

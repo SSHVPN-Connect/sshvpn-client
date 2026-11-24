@@ -182,7 +182,7 @@ impl Picker {
         }
         ui.label(
             egui::RichText::new("Выберите программы, которые должны работать через туннель.")
-                .color(crate::ui::MUTED),
+                .color(crate::ui::muted()),
         );
         ui.add_space(8.0);
         let mut refresh = false;
@@ -223,7 +223,7 @@ impl Picker {
                     (row.has_window || self.all_processes) && row.searchable.contains(&search)
                 }) {
                     matched = true;
-                    crate::ui::surface(crate::ui::BACKGROUND, 12, 8).show(ui, |ui| {
+                    crate::ui::surface(crate::ui::background(), 12, 8).show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
                             if let Some(icon) = &row.icon {
@@ -238,7 +238,7 @@ impl Picker {
                                     ui.label(
                                         egui::RichText::new(exe.to_string_lossy())
                                             .small()
-                                            .color(crate::ui::MUTED),
+                                            .color(crate::ui::muted()),
                                     );
                                 }
                             });

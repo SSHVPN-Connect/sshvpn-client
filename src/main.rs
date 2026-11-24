@@ -11,14 +11,16 @@ mod instance;
 mod invite_ui;
 mod invites;
 mod profiles;
-mod running_apps;
 mod ru_ranges;
+mod running_apps;
 mod tray;
 mod tunnel;
 mod tunnel_job;
 mod ui;
 mod updater;
 mod vpn;
+mod vpn_log;
+mod vpn_service;
 use profiles::{Authentication, Ipv4Routing, Mode, Profiles, SavedProfile};
 use tunnel::Tunnel;
 use vpn::Vpn;
@@ -78,6 +80,7 @@ impl ActiveProfile {
 }
 
 struct Client {
+    adapters: vpn::AdapterCache,
     directory: Result<std::path::PathBuf, String>,
     profiles: Profiles,
     draft: SavedProfile,
@@ -112,6 +115,7 @@ impl Client {
             .into_iter()
             .collect();
         let mut client = Self {
+            adapters: Default::default(),
             directory,
             profiles,
             draft: SavedProfile::default(),
@@ -146,6 +150,7 @@ impl Client {
         let mut profiles = self.profiles.clone();
         let keep_selection_on_insert = profiles.selected.take();
         let mut editor = Self {
+            adapters: self.adapters.clone(),
             directory: self.directory.clone(),
             profiles,
             draft: SavedProfile::default(),
@@ -309,7 +314,11 @@ impl Client {
     fn can_edit_profile(&self, index: usize) -> bool {
         self.directory.is_ok()
             && self.disconnecting.is_none()
-            && self.active_profile.as_ref().and_then(|profile| profile.index) != Some(index)
+            && self
+                .active_profile
+                .as_ref()
+                .and_then(|profile| profile.index)
+                != Some(index)
     }
 
     fn delete_profile(&mut self) -> Result<(), String> {
@@ -320,12 +329,17 @@ impl Client {
             return Err("Отключите профиль перед удалением.".into());
         }
         let mut updated = self.profiles.clone();
-        updated.entries.remove(index);
+        let removed = updated.entries.remove(index);
         updated.selected =
             (!updated.entries.is_empty()).then(|| index.min(updated.entries.len() - 1));
         self.store(updated)?;
+        if let Some(id) = removed.adapter_id {
+            self.adapters.remove(id);
+        }
         if let Some(active) = &mut self.active_profile {
-            active.index = active.index.map(|position| position - usize::from(position > index));
+            active.index = active
+                .index
+                .map(|position| position - usize::from(position > index));
         }
         self.load_selection();
         Ok(())
@@ -403,7 +417,7 @@ impl Client {
 
     fn start_connection(
         &mut self,
-        profile: SavedProfile,
+        mut profile: SavedProfile,
         secret: String,
         index: Option<usize>,
     ) -> Result<(), String> {
@@ -418,17 +432,35 @@ impl Client {
                     profile.ipv4_routing.application_paths()?,
                 )?)
             }
-            Mode::SystemVpn => Connection::Vpn(Vpn::start(
-                profile.connection,
-                password_auth,
-                secret,
-                profile.ipv4_routing.routes()?,
-                if profile.ipv4_routing.exclude_ru {
-                    Some(self.directory.as_ref().map_err(Clone::clone)?.clone())
-                } else {
-                    None
-                },
-            )?),
+            Mode::SystemVpn => {
+                if let Some(index) = index {
+                    if profile.adapter_id.is_none() {
+                        let id = vpn::new_adapter_id()?;
+                        let mut updated = self.profiles.clone();
+                        updated.entries[index].adapter_id = Some(id);
+                        let selected = updated.selected == Some(index);
+                        self.store(updated)?;
+                        if selected {
+                            self.draft.adapter_id = Some(id);
+                        }
+                        profile.adapter_id = Some(id);
+                    }
+                }
+                Connection::Vpn(Vpn::start(
+                    profile.connection,
+                    profile.name,
+                    password_auth,
+                    secret,
+                    profile.ipv4_routing.routes()?,
+                    if profile.ipv4_routing.exclude_ru {
+                        Some(self.directory.as_ref().map_err(Clone::clone)?.clone())
+                    } else {
+                        None
+                    },
+                    index.and(profile.adapter_id),
+                    self.adapters.clone(),
+                )?)
+            }
             Mode::Socks5 => {
                 Connection::Socks(Tunnel::start(&profile.connection, password_auth, secret)?)
             }
@@ -454,6 +486,7 @@ mod tests {
     fn profile_actions_keep_drafts_and_credentials_separate() {
         let temp = tempfile::tempdir().unwrap();
         let mut client = Client {
+            adapters: Default::default(),
             directory: Ok(temp.path().to_owned()),
             profiles: Profiles::default(),
             draft: SavedProfile::default(),
@@ -553,7 +586,62 @@ mod tests {
     }
 }
 
+fn set_taskbar_identity() {
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SetCurrentProcessExplicitAppUserModelID(id: *const u16) -> i32;
+    }
+    let id = if cfg!(debug_assertions) {
+        "SSHVPNConnect.SSHTunnel.Debug"
+    } else {
+        "SSHVPNConnect.SSHTunnel"
+    };
+    let wide: Vec<u16> = id.encode_utf16().chain(Some(0)).collect();
+    unsafe { SetCurrentProcessExplicitAppUserModelID(wide.as_ptr()) };
+}
+
+fn set_window_icons(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED,
+        SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, WM_SETICON,
+    };
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> windows_sys::Win32::Foundation::HMODULE;
+    }
+    // Resource 1 is the same ICO that the installer embeds.
+    unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        if module.is_null() {
+            return;
+        }
+        for (slot, width, height) in [
+            (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
+            (ICON_BIG, SM_CXICON, SM_CYICON),
+        ] {
+            let icon = LoadImageW(
+                module,
+                std::ptr::without_provenance(1),
+                IMAGE_ICON,
+                GetSystemMetrics(width),
+                GetSystemMetrics(height),
+                LR_SHARED,
+            );
+            if !icon.is_null() {
+                SendMessageW(hwnd, WM_SETICON, slot as usize, icon as isize);
+            }
+        }
+    }
+}
+
 fn main() -> eframe::Result {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--vpn-service")
+    {
+        std::process::exit(if vpn_service::run().is_ok() { 0 } else { 1 });
+    }
     if let Some(result) = askpass::run_helper() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
@@ -565,6 +653,9 @@ fn main() -> eframe::Result {
         .and_then(|_| args.next())
         .and_then(|arg| arg.to_str()?.parse::<u64>().ok())
         .filter(|_| elevation::is_admin());
+    let elevated_profile = args
+        .next()
+        .and_then(|arg| arg.to_str()?.parse::<usize>().ok());
     if elevated_scope.is_some() {
         if !instance::Instance::wait_until_closed(
             &instance_name,
@@ -584,9 +675,10 @@ fn main() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1000.0, 660.0])
         .with_min_inner_size([700.0, 520.0]);
+    set_taskbar_identity();
     if let Ok(icon) = image::load_from_memory_with_format(
-        include_bytes!("../assets/ssh-tunnel.ico"),
-        image::ImageFormat::Ico,
+        include_bytes!("../assets/ssh-tunnel-logo.png"),
+        image::ImageFormat::Png,
     ) {
         let icon = icon.into_rgba8();
         viewport = viewport.with_icon(egui::IconData {
@@ -610,8 +702,14 @@ fn main() -> eframe::Result {
             let mut client = Client::new();
             if let Some(scope) = elevated_scope {
                 let result = if elevation::profile_scope().ok() == Some(scope) {
-                    match client.profiles.selected {
-                        Some(index) if client.draft.mode == Mode::SystemVpn => {
+                    match elevated_profile.or(client.profiles.selected) {
+                        Some(index)
+                            if client
+                                .profiles
+                                .entries
+                                .get(index)
+                                .is_some_and(|profile| profile.mode == Mode::SystemVpn) =>
+                        {
                             client.connect_profile(index)
                         }
                         _ => Err("Выберите сохранённый профиль System VPN.".into()),
@@ -624,6 +722,7 @@ fn main() -> eframe::Result {
             let mut desktop = ui::Desktop::new(&cc.egui_ctx, client)?;
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let RawWindowHandle::Win32(handle) = cc.window_handle()?.as_raw() {
+                set_window_icons(handle.hwnd.get() as _);
                 desktop.instance_listener =
                     Some(instance.listen(handle.hwnd.get(), cc.egui_ctx.clone())?);
             }

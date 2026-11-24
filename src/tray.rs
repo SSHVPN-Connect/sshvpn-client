@@ -26,7 +26,7 @@ impl Tray {
         };
         let hwnd = handle.hwnd.get();
         let tree = resvg::usvg::Tree::from_data(
-            include_bytes!("../assets/shield.svg"),
+            include_bytes!("../assets/flow-22.svg"),
             &Default::default(),
         )
         .map_err(|e| e.to_string())?;

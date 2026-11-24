@@ -76,7 +76,7 @@ pub fn system_program(relative_path: &str) -> Result<PathBuf, String> {
 
 pub struct Tunnel {
     process: Child,
-    job: TunnelJob,
+    _job: TunnelJob,
     diagnostics: fs::File,
     endpoint: SocketAddrV4,
     netstat: PathBuf,
@@ -127,7 +127,7 @@ impl Tunnel {
             .map_err(|error| format!("Could not launch OpenSSH: {error}"))?;
         Ok(Self {
             process,
-            job,
+            _job: job,
             diagnostics,
             endpoint,
             netstat,
@@ -137,8 +137,8 @@ impl Tunnel {
         })
     }
 
-    pub(crate) fn spawn_companion(&self, command: &mut Command) -> io::Result<Child> {
-        self.job.spawn(command)
+    pub(crate) fn process_id(&self) -> u32 {
+        self.process.id()
     }
 }
 
@@ -305,6 +305,33 @@ pub fn ssh_error(diagnostics: &mut fs::File, fallback: String) -> String {
     }
 }
 
+pub(crate) fn owns_socks_listener(
+    netstat: &Path,
+    endpoint: SocketAddrV4,
+    pid: u32,
+) -> Result<bool, String> {
+    let output = Command::new(netstat)
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-ano", "-p", "tcp"])
+        .output()
+        .map_err(|error| format!("Could not check SOCKS5 listener: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not check SOCKS5 listener ({})",
+            output.status
+        ));
+    }
+    let endpoint = endpoint.to_string();
+    let pid = pid.to_string();
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        let mut columns = line.split_whitespace();
+        columns.next() == Some("TCP")
+            && columns.next() == Some(endpoint.as_str())
+            && columns.next() == Some("0.0.0.0:0")
+            && columns.last() == Some(pid.as_str())
+    }))
+}
+
 impl Tunnel {
     pub fn endpoint(&self) -> SocketAddrV4 {
         self.endpoint
@@ -322,26 +349,7 @@ impl Tunnel {
             ));
         }
         if !self.ready && Instant::now() >= self.next_probe {
-            let output = Command::new(&self.netstat)
-                .creation_flags(CREATE_NO_WINDOW)
-                .args(["-ano", "-p", "tcp"])
-                .output()
-                .map_err(|error| format!("Could not check SOCKS5 listener: {error}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "Could not check SOCKS5 listener ({})",
-                    output.status
-                ));
-            }
-            let endpoint = self.endpoint.to_string();
-            let pid = self.process.id().to_string();
-            self.ready = String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-                let mut columns = line.split_whitespace();
-                columns.next() == Some("TCP")
-                    && columns.next() == Some(endpoint.as_str())
-                    && columns.next() == Some("0.0.0.0:0")
-                    && columns.last() == Some(pid.as_str())
-            });
+            self.ready = owns_socks_listener(&self.netstat, self.endpoint, self.process.id())?;
             self.next_probe = Instant::now() + Duration::from_secs(1);
         }
         Ok(())
